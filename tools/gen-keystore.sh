@@ -5,6 +5,6 @@ keytool -genkeypair -v \
   -keystore dshmobile-release.keystore \
   -alias dshmobile \
   -keyalg RSA -keysize 2048 -validity 10000 \
-  -storepass "${PROOT_APK_STORE_PASS:?set PROOT_APK_STORE_PASS}" \
-  -keypass "${PROOT_APK_KEY_PASS:?set PROOT_APK_KEY_PASS}" \
+  -storepass "${DSHMOBILE_STORE_PASS:?set PROOT_APK_STORE_PASS}" \
+  -keypass "${DSHMOBILE_KEY_PASS:?set PROOT_APK_KEY_PASS}" \
   -dname "CN=dsh-mobile, OU=dsh-mobile, O=dsh-mobile, L=, S=, C="
