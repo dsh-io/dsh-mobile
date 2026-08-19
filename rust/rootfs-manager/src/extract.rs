@@ -29,33 +29,41 @@ pub fn extract_archive(tarball: &Path, dest: &Path) -> Result<(), String> {
 /// including DT_NEEDED libs that ship mode 0600 in the archive). Engine
 /// binaries and libs never write themselves at runtime.
 ///
-/// Uses libc::chmod/stat directly: std::fs::set_permissions relies on statx,
+/// Uses libc::stat/chmod directly: std::fs::set_permissions relies on statx,
 /// which is unreliable in sandboxed/emulated environments, and libc calls
 /// behave identically on bionic (Android).
+///
+/// Symlinks are skipped entirely (lstat): following one could escape the
+/// tree — Debian's /usr/lib/ssl -> /etc/ssl and /lib -> usr/lib mean a
+/// follow-based walk reaches host directories outside the rootfs (EACCES on
+/// root-owned 0700 dirs, e.g. /etc/ssl/private), failing the whole extract.
+/// The symlink target is handled by its own archive entry if any.
 fn strip_write_bits(root: &Path) -> Result<(), String> {
     fn visit(dir: &Path) -> Result<(), String> {
         use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::MetadataExt;
         for entry in std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))? {
             let p = entry
                 .map_err(|e| format!("read_dir entry: {e}"))?
                 .path();
-            if p.is_dir() {
+            let md = match std::fs::symlink_metadata(&p) {
+                Ok(md) => md,
+                Err(_) => continue,
+            };
+            if md.file_type().is_symlink() {
+                continue;
+            }
+            if md.is_dir() {
                 visit(&p)?;
                 continue;
             }
             let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let c = std::ffi::CString::new(p.as_os_str().as_bytes())
-                .map_err(|_| format!("cstring: {}", p.display()))?;
-            let mode = unsafe {
-                let mut st: libc::stat = std::mem::zeroed();
-                if libc::stat(c.as_ptr(), &mut st) != 0 {
-                    continue;
-                }
-                st.st_mode
-            };
+            let mode = md.mode();
             let is_exec = mode & 0o111 != 0;
             let is_lib = name.ends_with(".so") || name.ends_with(".node");
             if is_exec || is_lib {
+                let c = std::ffi::CString::new(p.as_os_str().as_bytes())
+                    .map_err(|_| format!("cstring: {}", p.display()))?;
                 unsafe {
                     libc::chmod(c.as_ptr(), mode & !0o222);
                 }
@@ -68,28 +76,30 @@ fn strip_write_bits(root: &Path) -> Result<(), String> {
 
 /// Recursively restore write bits (undo W^X stripping) so a stale tree can
 /// be removed or overwritten — an interrupted previous run must never leave
-/// a permanently unremovable/EACCES'd extraction.
+/// a permanently unremovable/EACCES'd extraction. Symlinks are skipped
+/// (lstat) for the same reason as strip_write_bits.
 fn make_writable_recursive(root: &Path) -> Result<(), String> {
     use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
     fn visit(dir: &Path) -> Result<(), String> {
         for entry in std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))? {
             let p = entry
                 .map_err(|e| format!("read_dir entry: {e}"))?
                 .path();
-            if p.is_dir() {
+            let md = match std::fs::symlink_metadata(&p) {
+                Ok(md) => md,
+                Err(_) => continue,
+            };
+            if md.file_type().is_symlink() {
+                continue;
+            }
+            if md.is_dir() {
                 visit(&p)?;
             }
             let c = std::ffi::CString::new(p.as_os_str().as_bytes())
                 .map_err(|_| format!("cstring: {}", p.display()))?;
-            let mode = unsafe {
-                let mut st: libc::stat = std::mem::zeroed();
-                if libc::stat(c.as_ptr(), &mut st) != 0 {
-                    continue;
-                }
-                st.st_mode
-            };
             unsafe {
-                libc::chmod(c.as_ptr(), mode | 0o200);
+                libc::chmod(c.as_ptr(), md.mode() | 0o200);
             }
         }
         Ok(())
@@ -229,6 +239,47 @@ mod tests {
         let err = extract_archive(&tgz, &dest).unwrap_err();
         assert!(err.contains("extract"), "expected extract error, got: {err}");
         assert!(!dir.join("evil").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extract_skips_symlinks_and_does_not_escape_tree() {
+        // Debian rootfs carries absolute symlinks (/lib -> usr/lib,
+        // /usr/lib/ssl -> /etc/ssl). strip_write_bits must never follow
+        // them: a follow-based walk reaches host/Android system dirs
+        // outside the rootfs (root-owned 0700 /etc/ssl/private -> EACCES),
+        // which failed extraction on device (rc=-1).
+        let dir = tmp_dir("symlink");
+        let tgz = dir.join("root.tar.gz");
+        let f = std::fs::File::create(&tgz).unwrap();
+        let mut gz = GzEncoder::new(f, Compression::default());
+        {
+            let mut a = tar::Builder::new(&mut gz);
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Directory);
+            h.set_mode(0o700);
+            h.set_size(0);
+            h.set_cksum();
+            a.append_data(&mut h, "etc/ssl/private", &[][..]).unwrap();
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Symlink);
+            h.set_mode(0o777);
+            h.set_size(0);
+            h.set_link_name("/etc/ssl").unwrap();
+            h.set_cksum();
+            a.append_data(&mut h, "usr/lib/ssl", &[][..]).unwrap();
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Directory);
+            h.set_mode(0o755);
+            h.set_size(0);
+            h.set_cksum();
+            a.append_data(&mut h, "usr/lib", &[][..]).unwrap();
+        }
+        gz.finish().unwrap();
+
+        let dest = dir.join("dest");
+        extract_archive(&tgz, &dest).unwrap();
+        assert!(dest.join("etc/ssl/private").is_dir());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
