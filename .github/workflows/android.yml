@@ -19,7 +19,11 @@ jobs:
       - name: Smoke-test rootfs under proot (host)
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq proot
-          tar xJf /tmp/rootfs-out/debian.tar.xz -C /tmp
+          mkdir -p /tmp/rootfs
+          # --no-same-owner/--touch: unprivileged runner cannot restore
+          # owner/mtime (Debian / is 1755); extraction correctness on
+          # Android is covered by extract.rs tests, this only smoke-runs node
+          tar xJf /tmp/rootfs-out/debian.tar.xz -C /tmp/rootfs --no-same-owner --no-same-permissions --touch
           proot -0 -r /tmp/rootfs /usr/bin/env -i HOME=/root PATH=/usr/bin:/bin node --version
           rm -rf /tmp/rootfs
 
