@@ -1,4 +1,5 @@
 pub mod command;
+pub mod daemon;
 pub mod pty;
 pub mod session;
 

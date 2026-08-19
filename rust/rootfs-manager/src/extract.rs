@@ -16,7 +16,98 @@ pub fn extract_archive(tarball: &Path, dest: &Path) -> Result<(), String> {
     } else {
         return Err(format!("unsupported archive extension: {ext}"));
     }
+    strip_write_bits(dest)?;
     Ok(())
+}
+
+/// Vendor W^X compatibility (device-verified in the deprecated harness-mobile
+/// project, SnapshotExtractor): Huawei/EMUI (and Android 10 hardening) refuse
+/// to exec a writable file, and refuse mmap(PROT_EXEC) of a writable file —
+/// so a writable shared library fails dlopen even when the module itself is
+/// r-x. After extraction, strip write bits from every executable file and
+/// from every `.so`/`.node` file (dlopen'd modules like node-pty's pty.node,
+/// including DT_NEEDED libs that ship mode 0600 in the archive). Engine
+/// binaries and libs never write themselves at runtime.
+///
+/// Uses libc::chmod/stat directly: std::fs::set_permissions relies on statx,
+/// which is unreliable in sandboxed/emulated environments, and libc calls
+/// behave identically on bionic (Android).
+fn strip_write_bits(root: &Path) -> Result<(), String> {
+    fn visit(dir: &Path) -> Result<(), String> {
+        use std::os::unix::ffi::OsStrExt;
+        for entry in std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))? {
+            let p = entry
+                .map_err(|e| format!("read_dir entry: {e}"))?
+                .path();
+            if p.is_dir() {
+                visit(&p)?;
+                continue;
+            }
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let c = std::ffi::CString::new(p.as_os_str().as_bytes())
+                .map_err(|_| format!("cstring: {}", p.display()))?;
+            let mode = unsafe {
+                let mut st: libc::stat = std::mem::zeroed();
+                if libc::stat(c.as_ptr(), &mut st) != 0 {
+                    continue;
+                }
+                st.st_mode
+            };
+            let is_exec = mode & 0o111 != 0;
+            let is_lib = name.ends_with(".so") || name.ends_with(".node");
+            if is_exec || is_lib {
+                unsafe {
+                    libc::chmod(c.as_ptr(), mode & !0o222);
+                }
+            }
+        }
+        Ok(())
+    }
+    visit(root)
+}
+
+/// Recursively restore write bits (undo W^X stripping) so a stale tree can
+/// be removed or overwritten — an interrupted previous run must never leave
+/// a permanently unremovable/EACCES'd extraction.
+fn make_writable_recursive(root: &Path) -> Result<(), String> {
+    use std::os::unix::ffi::OsStrExt;
+    fn visit(dir: &Path) -> Result<(), String> {
+        for entry in std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))? {
+            let p = entry
+                .map_err(|e| format!("read_dir entry: {e}"))?
+                .path();
+            if p.is_dir() {
+                visit(&p)?;
+            }
+            let c = std::ffi::CString::new(p.as_os_str().as_bytes())
+                .map_err(|_| format!("cstring: {}", p.display()))?;
+            let mode = unsafe {
+                let mut st: libc::stat = std::mem::zeroed();
+                if libc::stat(c.as_ptr(), &mut st) != 0 {
+                    continue;
+                }
+                st.st_mode
+            };
+            unsafe {
+                libc::chmod(c.as_ptr(), mode | 0o200);
+            }
+        }
+        Ok(())
+    }
+    visit(root)
+}
+
+fn remove_dir_all_force(p: &Path, what: &str) -> Result<(), String> {
+    match std::fs::remove_dir_all(p) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            // Read-only files left by a W^X-stripped previous run can make
+            // removal fail on some filesystems; restore write bits and retry
+            // once before giving up (idempotent reinstall).
+            let _ = make_writable_recursive(p);
+            std::fs::remove_dir_all(p).map_err(|e| format!("clean {what}: {e}"))
+        }
+    }
 }
 
 pub fn install_rootfs(tarball: &Path, dest: &Path, expected_sha256: &str) -> Result<(), String> {
@@ -26,11 +117,11 @@ pub fn install_rootfs(tarball: &Path, dest: &Path, expected_sha256: &str) -> Res
     }
     let tmp = dest.with_extension("tmp");
     if tmp.exists() {
-        std::fs::remove_dir_all(&tmp).map_err(|e| format!("clean tmp: {e}"))?;
+        remove_dir_all_force(&tmp, "tmp")?;
     }
     extract_archive(tarball, &tmp)?;
     if dest.exists() {
-        std::fs::remove_dir_all(dest).map_err(|e| format!("clean dest: {e}"))?;
+        remove_dir_all_force(dest, "dest")?;
     }
     std::fs::rename(&tmp, dest).map_err(|e| format!("rename: {e}"))?;
     Ok(())
@@ -42,16 +133,15 @@ mod tests {
     use crate::verify::sha256_hex;
     use flate2::write::GzEncoder;
     use flate2::Compression;
-
-    fn make_tar_gz(path: &Path, entries: &[(&str, &[u8])]) {
+    fn make_tar_gz(path: &Path, entries: &[(&str, &[u8], u32)]) {
         let f = std::fs::File::create(path).unwrap();
         let mut gz = GzEncoder::new(f, Compression::default());
         {
             let mut a = tar::Builder::new(&mut gz);
-            for (name, data) in entries {
+            for (name, data, mode) in entries {
                 let mut h = tar::Header::new_gnu();
                 h.set_size(data.len() as u64);
-                h.set_mode(0o755);
+                h.set_mode(*mode);
                 h.set_cksum();
                 a.append_data(&mut h, name, data.as_ref()).unwrap();
             }
@@ -66,11 +156,21 @@ mod tests {
         dir
     }
 
+    fn mode_of(p: &Path) -> u32 {
+        use std::os::unix::ffi::OsStrExt;
+        let c = std::ffi::CString::new(p.as_os_str().as_bytes()).unwrap();
+        unsafe {
+            let mut st: libc::stat = std::mem::zeroed();
+            assert_eq!(libc::stat(c.as_ptr(), &mut st), 0);
+            st.st_mode
+        }
+    }
+
     #[test]
     fn extract_flat_gz() {
         let dir = tmp_dir("flat");
         let tgz = dir.join("root.tar.gz");
-        make_tar_gz(&tgz, &[("usr/bin/hello", b"#!/bin/sh\necho hi\n")]);
+        make_tar_gz(&tgz, &[("usr/bin/hello", b"#!/bin/sh\necho hi\n", 0o755)]);
         let dest = dir.join("dest");
         extract_archive(&tgz, &dest).unwrap();
         assert!(dest.join("usr/bin/hello").exists());
@@ -81,7 +181,7 @@ mod tests {
     fn install_verifies_hash_then_renames() {
         let dir = tmp_dir("install");
         let tgz = dir.join("root.tar.gz");
-        make_tar_gz(&tgz, &[("etc/os-release", b"NAME=Test\n")]);
+        make_tar_gz(&tgz, &[("etc/os-release", b"NAME=Test\n", 0o644)]);
         let good = sha256_hex(&tgz).unwrap();
         let dest = dir.join("rootfs/alpine");
         install_rootfs(&tgz, &dest, &good).unwrap();
@@ -94,7 +194,7 @@ mod tests {
     fn install_rejects_bad_hash() {
         let dir = tmp_dir("badhash");
         let tgz = dir.join("root.tar.gz");
-        make_tar_gz(&tgz, &[("a", b"b")]);
+        make_tar_gz(&tgz, &[("a", b"b", 0o644)]);
         let dest = dir.join("rootfs/alpine");
         let err = install_rootfs(&tgz, &dest, &"0".repeat(64)).unwrap_err();
         assert!(err.contains("sha256 mismatch"));
@@ -129,6 +229,64 @@ mod tests {
         let err = extract_archive(&tgz, &dest).unwrap_err();
         assert!(err.contains("extract"), "expected extract error, got: {err}");
         assert!(!dir.join("evil").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn executable_files_lose_write_bits() {
+        let dir = tmp_dir("wxe");
+        let tgz = dir.join("root.tar.gz");
+        make_tar_gz(
+            &tgz,
+            &[
+                ("usr/bin/tool", b"#!/bin/sh\necho t\n", 0o755),
+                ("usr/bin/plain", b"data\n", 0o644),
+            ],
+        );
+        let dest = dir.join("dest");
+        extract_archive(&tgz, &dest).unwrap();
+        assert_eq!(mode_of(&dest.join("usr/bin/tool")) & 0o222, 0, "executable must be non-writable (W^X)");
+        assert_eq!(mode_of(&dest.join("usr/bin/tool")) & 0o111, 0o111, "exec bit must survive");
+        assert_ne!(mode_of(&dest.join("usr/bin/plain")) & 0o222, 0, "plain file keeps write bits");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn shared_libs_lose_write_bits_even_when_not_executable() {
+        let dir = tmp_dir("wxl");
+        let tgz = dir.join("root.tar.gz");
+        make_tar_gz(
+            &tgz,
+            &[
+                ("usr/lib/libc++.so", b"ELF-LIKE", 0o600),
+                ("usr/lib/pty.node", b"ELF-LIKE", 0o755),
+                ("usr/lib/libfoo.a", b"AR", 0o644),
+            ],
+        );
+        let dest = dir.join("dest");
+        extract_archive(&tgz, &dest).unwrap();
+        assert_eq!(mode_of(&dest.join("usr/lib/libc++.so")) & 0o222, 0, ".so must be non-writable");
+        assert_eq!(mode_of(&dest.join("usr/lib/pty.node")) & 0o222, 0, ".node must be non-writable");
+        assert_ne!(mode_of(&dest.join("usr/lib/libfoo.a")) & 0o222, 0, "non-dlopen lib keeps write bits");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reinstall_over_existing_tree_succeeds() {
+        let dir = tmp_dir("reinstall");
+        let tgz = dir.join("root.tar.gz");
+        make_tar_gz(
+            &tgz,
+            &[("usr/bin/tool", b"#!/bin/sh\necho t\n", 0o755), ("etc/os-release", b"NAME=Test\n", 0o644)],
+        );
+        let good = sha256_hex(&tgz).unwrap();
+        let dest = dir.join("rootfs/debian");
+        install_rootfs(&tgz, &dest, &good).unwrap();
+        // Second install over the W^X-stripped tree must succeed (idempotent
+        // retry — a failed first run never leaves a permanent EACCES).
+        install_rootfs(&tgz, &dest, &good).unwrap();
+        assert_eq!(mode_of(&dest.join("usr/bin/tool")) & 0o222, 0);
+        assert!(dest.join("etc/os-release").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
