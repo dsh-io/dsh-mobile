@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.os.IBinder
+import com.dshio.dshmobile.log.AppLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -52,8 +53,10 @@ class DshService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        AppLog.i("Svc", "onStartCommand action=${intent?.action} flags=$flags startId=$startId")
         when (intent?.action) {
             ACTION_STOP -> {
+                AppLog.i("Svc", "STOP requested")
                 stopDshInternal()
                 getSystemService(NotificationManager::class.java).cancelAll()
                 stopSelf()
@@ -72,30 +75,56 @@ class DshService : Service() {
         // Single-flight: only one caller actually starts the engine; the
         // losing caller returns immediately (system restart + activity
         // ACTION_START + crash-retry can overlap).
-        if (!STARTING.compareAndSet(false, true)) return
+        if (!STARTING.compareAndSet(false, true)) {
+            AppLog.d("Svc", "startDshInternal: STARTING CAS lost")
+            return
+        }
         try {
-            if (runningPid > 0) return
+            if (runningPid > 0) {
+                AppLog.d("Svc", "startDshInternal: already running (pid=$runningPid)")
+                return
+            }
             // No live process ⇒ no double-start race: clear the cooldown so
             // recovery is not delayed by a stale window (I-11 pattern).
             if (runningPid <= 0) lastStartAttemptAt = 0
             // Cold node boot takes 20-45s (plugin tree + first bind); within
             // the cooldown window of the last real start, do not start again
             // — the supervision poll keeps watching.
-            if (System.currentTimeMillis() - lastStartAttemptAt < START_COOLDOWN_MS) return
+            if (System.currentTimeMillis() - lastStartAttemptAt < START_COOLDOWN_MS) {
+                AppLog.w("Svc", "startDshInternal: inside cooldown, skipping (restartCount=$restartCount)")
+                return
+            }
+            // rotate the engine log once per service start so it cannot grow
+            // unbounded across days of running
+            rotateEngineLog()
             val dshDir = File(filesDir, "dsh").absolutePath
             val logPath = File(filesDir, "logs/dsh.log").absolutePath
+            AppLog.i("Svc", "starting engine: dshDir=$dshDir log=$logPath")
             val pid = NativeLib.startDsh(dshDir, logPath)
             if (pid <= 0) {
+                AppLog.e("Svc", "startDsh returned pid=$pid — engine failed to spawn")
                 onCrash()
                 return
             }
             runningPid = pid
             lastStartAttemptAt = System.currentTimeMillis()
+            AppLog.i("Svc", "engine spawned pid=$pid (restartCount=$restartCount)")
             pollJob?.cancel()
             pollJob = scope.launch { supervise(pid) }
         } finally {
             STARTING.set(false)
         }
+    }
+
+    // Rotate dsh.log once per service start (>1MB → dsh.log.1) so the engine
+    // log stays bounded and the newest failure is always in the primary file.
+    private fun rotateEngineLog() {
+        val log = File(filesDir, "logs/dsh.log")
+        if (!log.exists()) return
+        if (log.length() < 1_048_576) return
+        val gen = File(filesDir, "logs/dsh.log.1")
+        gen.delete()
+        if (log.renameTo(gen)) AppLog.i("Svc", "rotated dsh.log (${log.length()} bytes)")
     }
 
     private suspend fun supervise(pid: Int) {
@@ -113,6 +142,7 @@ class DshService : Service() {
                 false
             }
             if (up) {
+                if (!ready) AppLog.i("Svc", "engine became ready on 127.0.0.1:3080 (pid=$pid)")
                 ready = true
                 isReady = true
                 delay(5000) // healthy: re-check every 5s to catch crashes
@@ -124,6 +154,11 @@ class DshService : Service() {
                 // harness-mobile project measured 20-45s, so 90s = the
                 // START_COOLDOWN_MS window, never kill a boot that is
                 // still in progress)
+                AppLog.e("Svc", "engine DOWN (ready=$ready backoff=$backoff) — recording exit status")
+                val status = NativeLib.reapExitStatus(pid)
+                if (status > 0) AppLog.e("Svc", "engine died with signal $status (SIGSEGV=11 SIGABRT=6 SIGKILL=9)")
+                else if (status < 0) AppLog.e("Svc", "engine exited with code ${-status}")
+                else AppLog.w("Svc", "engine unresponsive but alive (port 3080 not answering) — will force-stop")
                 onCrash()
                 return
             }
@@ -140,6 +175,7 @@ class DshService : Service() {
         // clears the cooldown and restarts immediately.
         stopDshInternal()
         if (restartCount >= 3) {
+            AppLog.e("Svc", "restartCount reached $restartCount — giving up, showing fatal notification")
             val lastLines = File(filesDir, "logs/dsh.log")
                 .takeIf { it.exists() }
                 ?.readLines()?.takeLast(10)?.joinToString("\n")
@@ -151,6 +187,7 @@ class DshService : Service() {
             return
         }
         restartCount++
+        AppLog.w("Svc", "restarting engine (attempt $restartCount/3)")
         startDshInternal()
     }
 
@@ -172,6 +209,7 @@ class DshService : Service() {
     private fun stopDshInternal() {
         pollJob?.cancel()
         if (runningPid > 0) {
+            AppLog.i("Svc", "stopping engine pid=$runningPid")
             NativeLib.stopDsh(runningPid)
             runningPid = -1
         }
@@ -179,6 +217,7 @@ class DshService : Service() {
     }
 
     override fun onDestroy() {
+        AppLog.i("Svc", "service destroyed")
         stopDshInternal()
         super.onDestroy()
     }

@@ -23,6 +23,14 @@ object NativeLib {
     /** Terminate the engine process group (SIGTERM → SIGKILL). */
     external fun stopDsh(pid: Int): Boolean
 
+    /**
+     * Reap the engine child and report how it died without blocking:
+     *   > 0 → terminated by that signal (11=SIGSEGV, 6=SIGABRT, 9=SIGKILL)
+     *   < 0 → exited normally with that code (negated)
+     *   0   → still alive (or already reaped by someone else)
+     */
+    external fun reapExitStatus(pid: Int): Int
+
     /** Hash-checked extract of a tarball asset to an explicit destination. */
     external fun extractVerified(tarballPath: String, expectedSha256: String, dest: String): Int
 

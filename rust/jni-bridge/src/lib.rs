@@ -252,6 +252,40 @@ pub extern "system" fn Java_com_dshio_dshmobile_NativeLib_stopDsh(
     proot_runner::daemon::stop_pgid(pid) as jboolean
 }
 
+/// Reap the engine child (non-blocking) and report how it died:
+///   > 0 → killed by that signal (11=SIGSEGV, 6=SIGABRT, 9=SIGKILL)
+///   < 0 → exited with that code (negated)
+///   0   → still alive / already reaped elsewhere
+fn reap_status(pid: i32) -> i32 {
+    if pid <= 0 {
+        return 0;
+    }
+    let mut status: libc::c_int = 0;
+    let r = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    if r != pid {
+        return 0; // still alive, or ECHILD (already reaped) — nothing to report
+    }
+    if libc::WIFSIGNALED(status) {
+        libc::WTERMSIG(status) as i32
+    } else if libc::WIFEXITED(status) {
+        -(libc::WEXITSTATUS(status) as i32)
+    } else {
+        0
+    }
+}
+
+/// JNI entry for reap_status. The supervision loop calls this the moment
+/// port 3080 stops answering, so a native crash of node/proot is recorded as
+/// a signal instead of an unexplained "engine DOWN".
+#[no_mangle]
+pub extern "system" fn Java_com_dshio_dshmobile_NativeLib_reapExitStatus(
+    _env: JNIEnv,
+    _class: JClass,
+    pid: jint,
+) -> jint {
+    reap_status(pid)
+}
+
 /// Hash-checked extract of a tarball asset to an explicit destination.
 #[no_mangle]
 pub extern "system" fn Java_com_dshio_dshmobile_NativeLib_extractVerified(
@@ -304,6 +338,63 @@ mod tests {
             let r = libc::waitpid(pid, &mut status, 0);
             assert!(r > 0);
             assert!(libc::WIFEXITED(status));
+        }
+    }
+
+    #[test]
+    fn reap_exit_status_reports_signal_and_code() {
+        unsafe {
+            // child killed by a signal (SIGKILL — proot-sandboxed hosts
+            // swallow self-raised SIGSEGV and report exit 0 instead)
+            let pid = libc::fork();
+            if pid == 0 {
+                libc::pause();
+                libc::_exit(0);
+            }
+            libc::kill(pid, libc::SIGKILL);
+            let mut st = 0;
+            for _ in 0..100 {
+                st = reap_status(pid);
+                if st != 0 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert_eq!(st, libc::SIGKILL as i32);
+
+            // child exiting normally with code 7
+            let pid = libc::fork();
+            if pid == 0 {
+                libc::_exit(7);
+            }
+            let mut st = 0;
+            for _ in 0..100 {
+                st = reap_status(pid);
+                if st != 0 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert_eq!(st, -7);
+
+            // non-existent pid → 0 (ECHILD)
+            assert_eq!(reap_status(999_999), 0);
+        }
+    }
+
+    #[test]
+    fn reap_exit_status_live_child_returns_zero() {
+        unsafe {
+            let pid = libc::fork();
+            if pid == 0 {
+                libc::pause(); // wait for SIGKILL
+                libc::_exit(0);
+            }
+            let st = reap_status(pid);
+            assert_eq!(st, 0); // still alive — nothing to reap yet
+            libc::kill(pid, libc::SIGKILL);
+            let mut status: libc::c_int = 0;
+            assert_eq!(libc::waitpid(pid, &mut status, 0), pid);
         }
     }
 }

@@ -94,6 +94,9 @@ pub fn spawn_daemon(
 }
 
 /// SIGTERM the process group of pid, escalate to SIGKILL after 3s.
+/// Returns true when the process is confirmed dead. If the child was already
+/// reaped elsewhere (ECHILD), it is dead — return immediately instead of
+/// burning the full 3s window.
 pub fn stop_pgid(pid: libc::pid_t) -> bool {
     unsafe {
         libc::kill(-pid, libc::SIGTERM);
@@ -103,6 +106,9 @@ pub fn stop_pgid(pid: libc::pid_t) -> bool {
             let r = libc::waitpid(pid, &mut status, libc::WNOHANG);
             if r == pid {
                 return true;
+            }
+            if r < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD) {
+                return true; // already reaped — dead
             }
             if Instant::now() > deadline {
                 libc::kill(-pid, libc::SIGKILL);
@@ -182,6 +188,28 @@ mod tests {
         assert_eq!(reaped, pid);
         assert!(libc::WIFEXITED(status));
         assert_eq!(libc::WEXITSTATUS(status), 127);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stop_pgid_on_already_reaped_child_returns_immediately() {
+        let dir = std::env::temp_dir().join(format!("dsh-stop-reaped-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("dsh.log");
+        let pid = spawn_daemon(
+            &["/bin/true".into()],
+            "/bin/true",
+            &[],
+            &log,
+        )
+        .expect("spawn daemon");
+        let mut status: libc::c_int = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid); // reap it
+        // now stop_pgid must detect ECHILD and return true instantly (no 3s wait)
+        let start = std::time::Instant::now();
+        assert!(stop_pgid(pid));
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

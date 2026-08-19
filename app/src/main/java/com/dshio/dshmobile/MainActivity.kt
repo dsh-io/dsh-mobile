@@ -29,7 +29,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.dshio.dshmobile.log.AppLog
 import com.dshio.dshmobile.ui.ExtractScreen
+import com.dshio.dshmobile.ui.LogsScreen
 import com.dshio.dshmobile.ui.TerminalScreen
 import com.dshio.dshmobile.ui.WebviewScreen
 import com.dshio.dshmobile.ui.theme.DeepCodeTheme
@@ -74,16 +76,16 @@ class MainActivity : ComponentActivity() {
                         containerColor = MaterialTheme.colorScheme.background,
                         bottomBar = { NavBar(tab = tab, onSelect = { tab = it }) },
                     ) { padding ->
-                        if (tab == 0) {
-                            WebviewScreen(Modifier.fillMaxSize().padding(padding))
-                        } else {
-                            TerminalScreen(
+                        when (tab) {
+                            0 -> WebviewScreen(Modifier.fillMaxSize().padding(padding))
+                            1 -> TerminalScreen(
                                 filesDir = filesDir,
                                 distro = "debian",
                                 shell = "/bin/bash",
                                 noSeccomp = false,
                                 onExit = { tab = 0 },
                             )
+                            else -> LogsScreen(Modifier.fillMaxSize().padding(padding))
                         }
                     }
                 } else {
@@ -105,17 +107,24 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startExtract() {
-        if (!engineFlowRunning.compareAndSet(false, true)) return
+        if (!engineFlowRunning.compareAndSet(false, true)) {
+            AppLog.d("Main", "startExtract: CAS lost — another flow is running")
+            return
+        }
+        AppLog.i("Main", "startExtract: CAS won — starting bootstrap")
         CoroutineScope(Dispatchers.IO).launch {
+            val t0 = System.currentTimeMillis()
             try {
                 ensureProotBinary()
                 val missing = ensureAssetsExtracted { text ->
                     runOnUiThread { state = AppState.Extracting(text) }
                 }
                 if (missing != null) {
+                    AppLog.e("Main", "bootstrap failed: $missing")
                     runOnUiThread { state = AppState.Error(missing) }
                     return@launch
                 }
+                AppLog.i("Main", "assets ready in ${System.currentTimeMillis() - t0}ms")
                 val intent = Intent(this@MainActivity, DshService::class.java)
                 intent.action = DshService.ACTION_START
                 startForegroundService(intent) // minSdk 26, no legacy branch needed
@@ -125,8 +134,17 @@ class MainActivity : ComponentActivity() {
                     waited++
                 }
                 runOnUiThread {
-                    state = if (DshService.isReady) AppState.Ready else AppState.Error("DeepCode failed to start — see logs/dsh.log")
+                    state = if (DshService.isReady) {
+                        AppLog.i("Main", "engine ready after ${System.currentTimeMillis() - t0}ms")
+                        AppState.Ready
+                    } else {
+                        AppLog.e("Main", "engine not ready (waited ${waited}s, pid=${DshService.runningPid})")
+                        AppState.Error("DeepCode failed to start — see logs/dsh.log")
+                    }
                 }
+            } catch (e: Exception) {
+                AppLog.e("Main", "bootstrap threw: $e")
+                runOnUiThread { state = AppState.Error(e.message ?: "Unexpected failure") }
             } finally {
                 engineFlowRunning.set(false)
             }
@@ -218,7 +236,7 @@ private fun NavBar(tab: Int, onSelect: (Int) -> Unit) {
                 .padding(horizontal = 12.dp, vertical = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            listOf("Harness" to 0, "Terminal" to 1).forEach { (label, index) ->
+            listOf("Harness" to 0, "Terminal" to 1, "Logs" to 2).forEach { (label, index) ->
                 val selected = tab == index
                 Surface(
                     onClick = { onSelect(index) },

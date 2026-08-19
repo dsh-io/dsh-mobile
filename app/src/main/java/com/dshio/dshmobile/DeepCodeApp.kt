@@ -1,0 +1,20 @@
+package com.dshio.dshmobile
+
+import android.app.Application
+import com.dshio.dshmobile.log.AppLog
+import com.dshio.dshmobile.log.CrashHandler
+import java.io.File
+
+class DeepCodeApp : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        CrashHandler.install(this)
+        AppLog.init(File(filesDir, "logs"))
+        val version = try {
+            packageManager.getPackageInfo(packageName, 0).versionName
+        } catch (_: Exception) {
+            "?"
+        }
+        AppLog.i("App", "DeepCode $version starting (pid=${android.os.Process.myPid()})")
+    }
+}
