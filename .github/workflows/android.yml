@@ -83,9 +83,10 @@ jobs:
           cp /tmp/rootfs/debian.tar.xz.sha256 app/src/main/assets/rootfs/
           curl -fsSL -o app/src/main/assets/dsh/dsh-arm64-0.1.0-rc.6.tar.gz \
             "https://github.com/dsh-io/dsh-arm64/releases/download/v0.1.0-rc.6/dsh-arm64-0.1.0-rc.6.tar.gz"
-          # enforce the hash pinned in the plan (fail the build on drift)
-          echo "b8aa98f46f750bd909a105434a271276baab8893e786805b5a613cfc2fb65ba6  dsh-arm64-0.1.0-rc.6.tar.gz" \
-            | sha256sum -c - || (echo "!! dsh package sha256 mismatch (pinned in plan)" && exit 1)
+          # enforce the hash pinned in the plan (fail the build on drift);
+          # run inside the asset dir so sha256sum resolves the file name
+          (cd app/src/main/assets/dsh && echo "b8aa98f46f750bd909a105434a271276baab8893e786805b5a613cfc2fb65ba6  dsh-arm64-0.1.0-rc.6.tar.gz" \
+            | sha256sum -c -) || (echo "!! dsh package sha256 mismatch (pinned in plan)" && exit 1)
           # bare 64-hex hash asset, consumed by NativeLib.extractVerified
           echo -n "b8aa98f46f750bd909a105434a271276baab8893e786805b5a613cfc2fb65ba6" \
             > app/src/main/assets/dsh/dsh-arm64-0.1.0-rc.6.tar.gz.sha256
