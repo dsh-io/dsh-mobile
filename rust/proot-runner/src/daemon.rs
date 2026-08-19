@@ -1,3 +1,4 @@
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::time::Instant;
 
@@ -61,11 +62,12 @@ pub fn spawn_daemon(
                 let _ = std::fs::create_dir_all(dir);
             }
             let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND;
-            let log_fd = libc::open(
-                log_path.to_string_lossy().as_ptr() as *const libc::c_char,
-                flags,
-                0o644,
-            );
+            // CString, not to_string_lossy().as_ptr(): the Cow from
+            // to_string_lossy() is dropped at the end of the statement,
+            // leaving open() with a dangling pointer — the log fd silently
+            // never opens (flaky 'log never got output' in the daemon test).
+            let log_c = std::ffi::CString::new(log_path.as_os_str().as_bytes()).unwrap();
+            let log_fd = libc::open(log_c.as_ptr(), flags, 0o644);
             if log_fd >= 0 {
                 libc::dup2(log_fd, 1);
                 libc::dup2(log_fd, 2);
