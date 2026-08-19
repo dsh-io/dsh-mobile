@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- terminal prompt glyphs as solid shapes, inside the 66dp adaptive
+         safe zone (21..87 on the 108 grid). Solid fills keep the two glyphs
+         separated at small sizes; round-capped strokes bleed together. -->
+    <!-- solid triangle, tip at x=50 -->
+    <path
+        android:pathData="M22,38 L50,54 L22,70 Z"
+        android:fillColor="#FFFFFF" />
+    <!-- solid cursor bar with rounded ends, 10 units right of the tip -->
+    <path
+        android:pathData="M60,46 h20 a6,6 0 0 1 6,6 v4 a6,6 0 0 1 -6,6 h-20 a6,6 0 0 1 -6,-6 v-4 a6,6 0 0 1 6,-6 z"
+        android:fillColor="#FFFFFF" />
+</vector>

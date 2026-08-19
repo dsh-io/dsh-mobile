@@ -1,0 +1,98 @@
+name: android-build
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: "platform-tools build-tools;35.0.0 platforms;android-35 ndk;26.3.11579264"
+
+      - name: Install Rust Android targets
+        run: |
+          rustup toolchain install stable
+          rustup target add aarch64-linux-android
+          cargo install cargo-ndk --locked
+
+      - name: Build proot binary
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/26.3.11579264"
+          ./tools/build-proot.sh aarch64-linux-android
+
+      - name: Build Rust JNI libs
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/26.3.11579264"
+          cd rust && cargo ndk -t arm64-v8a -o ../app/src/main/jniLibs build --release
+
+      - name: Build APK
+        run: ./gradlew assembleRelease --no-daemon
+        env:
+          DSHMOBILE_KEYSTORE_B64: ${{ secrets.DSHMOBILE_KEYSTORE_B64 }}
+          DSHMOBILE_STORE_PASS: ${{ secrets.DSHMOBILE_STORE_PASS }}
+          DSHMOBILE_KEY_PASS: ${{ secrets.DSHMOBILE_KEY_PASS }}
+          DSHMOBILE_KEY_ALIAS: ${{ secrets.DSHMOBILE_KEY_ALIAS }}
+
+      - name: Verify APK
+        run: |
+          APK=$(ls app/build/outputs/apk/release/*.apk | head -1)
+          echo "APK=$APK"
+          unzip -t "$APK" | tail -1
+          ls -la "$APK"
+          $ANDROID_SDK_ROOT/build-tools/35.0.0/aapt dump badging "$APK" | head -3
+          $ANDROID_SDK_ROOT/build-tools/35.0.0/apksigner verify --print-certs "$APK" > /tmp/certs.txt
+          echo "--- signer certs ---"
+          cat /tmp/certs.txt
+          grep -q "Signer #1 certificate DN" /tmp/certs.txt || (echo "APK IS NOT SIGNED" && exit 1)
+
+      - name: Rust host tests
+        run: |
+          cd rust && cargo test --workspace
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: dsh-mobile-apk
+          path: app/build/outputs/apk/release/*.apk
+
+  release:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download APK
+        uses: actions/download-artifact@v5
+        with:
+          name: dsh-mobile-apk
+          path: dist
+
+      - name: Rename with version
+        run: |
+          ls -la dist/
+          APK=$(ls dist/*.apk | head -1)
+          mv "$APK" "dist/dsh-mobile-${GITHUB_REF_NAME}.apk"
+
+      - name: Verify release APK signature
+        run: |
+          $ANDROID_SDK_ROOT/build-tools/35.0.0/apksigner verify --print-certs "dist/dsh-mobile-${GITHUB_REF_NAME}.apk" | grep -q "Signer #1 certificate DN" \
+            || (echo "RELEASE APK IS NOT SIGNED" && exit 1)
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.apk
+          generate_release_notes: true

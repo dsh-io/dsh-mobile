@@ -1,0 +1,13 @@
+/target
+/local.properties
+*.keystore
+*.jks
+.idea/
+.gradle/
+build/
+app/build/
+rust/**/target/
+proot-apk-release.keystore
+*.jks
+*.keystore
+*.p12

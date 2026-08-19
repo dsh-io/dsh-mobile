@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["proot-runner", "rootfs-manager", "jni-bridge"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.75"
+
+[profile.release]
+lto = true
+strip = true

@@ -1,0 +1,14 @@
+[package]
+name = "jni-bridge"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+name = "proot_apk"
+crate-type = ["cdylib"]
+
+[dependencies]
+jni = { version = "0.21", default-features = false, features = ["invocation"] }
+libc = "0.2"
+proot-runner = { path = "../proot-runner" }
+rootfs-manager = { path = "../rootfs-manager" }
