@@ -27,7 +27,7 @@ jobs:
           # device-verified. chroot exercises the same rootfs+node combo
           # without ptrace.
           sudo chroot /tmp/rootfs /usr/bin/env -i HOME=/root PATH=/usr/bin:/bin node --version
-          rm -rf /tmp/rootfs
+          sudo rm -rf /tmp/rootfs
 
       - name: Upload rootfs artifact
         uses: actions/upload-artifact@v5
