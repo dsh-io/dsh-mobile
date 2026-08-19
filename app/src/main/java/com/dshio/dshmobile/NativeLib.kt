@@ -34,6 +34,9 @@ object NativeLib {
     /** Hash-checked extract of a tarball asset to an explicit destination. */
     external fun extractVerified(tarballPath: String, expectedSha256: String, dest: String): Int
 
+    /** Full error string of the most recent extractVerified call ("" on success). */
+    external fun lastExtractError(): String
+
     @JvmStatic
     fun onRustPanic(msg: String) {
         Log.e("DshMobile", "Rust panic: $msg")

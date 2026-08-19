@@ -1,13 +1,14 @@
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use jni::objects::{JClass, JObject, JString};
-use jni::sys::{jboolean, jint, JNI_VERSION_1_6};
+use jni::sys::{jboolean, jint, jstring, JNI_VERSION_1_6};
 use jni::JNIEnv;
 use jni::JavaVM;
 
 static FILES_DIR: OnceLock<PathBuf> = OnceLock::new();
 static JAVA_VM: OnceLock<JavaVM> = OnceLock::new();
+static LAST_ERROR: Mutex<String> = Mutex::new(String::new());
 
 const ENOENT: jint = -2;
 const EINVAL: jint = -22;
@@ -287,6 +288,10 @@ pub extern "system" fn Java_com_dshio_dshmobile_NativeLib_reapExitStatus(
 }
 
 /// Hash-checked extract of a tarball asset to an explicit destination.
+/// Error codes: -1 unexpected, -2 sha256 mismatch, -3 extraction error,
+/// -4 IO/cleanup error. The full error string is written to stderr (logcat
+/// on Android) and retained for lastExtractError() so the UI can show the
+/// real cause instead of a blanket code.
 #[no_mangle]
 pub extern "system" fn Java_com_dshio_dshmobile_NativeLib_extractVerified(
     mut env: JNIEnv,
@@ -298,14 +303,47 @@ pub extern "system" fn Java_com_dshio_dshmobile_NativeLib_extractVerified(
     let Ok(t) = get_str(&mut env, &tarball) else { return EINVAL };
     let Ok(sha) = get_str(&mut env, &expected_sha256) else { return EINVAL };
     let Ok(d) = get_str(&mut env, &dest) else { return EINVAL };
+    let set_err = |msg: &str| {
+        eprintln!("extractVerified error: {msg}");
+        if let Ok(mut guard) = LAST_ERROR.lock() {
+            *guard = msg.to_string();
+        }
+    };
     match rootfs_manager::extract::install_rootfs(
         &PathBuf::from(t),
         &PathBuf::from(d),
         &sha,
     ) {
-        Ok(()) => 0,
-        Err(_) => -1,
+        Ok(()) => {
+            if let Ok(mut guard) = LAST_ERROR.lock() {
+                guard.clear();
+            }
+            0
+        }
+        Err(e) => {
+            set_err(&e);
+            if e.contains("sha256 mismatch") {
+                -2
+            } else if e.starts_with("extract:") {
+                -3
+            } else {
+                -4
+            }
+        }
     }
+}
+
+/// The full error string of the most recent extractVerified call ("" on
+/// success). Lets the UI show the real cause of an extraction failure.
+#[no_mangle]
+pub extern "system" fn Java_com_dshio_dshmobile_NativeLib_lastExtractError(
+    env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    let msg = LAST_ERROR.lock().map(|g| g.clone()).unwrap_or_default();
+    env.new_string(msg)
+        .map(|s| s.into_raw())
+        .unwrap_or(std::ptr::null_mut())
 }
 
 #[cfg(test)]

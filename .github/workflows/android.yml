@@ -55,6 +55,22 @@ jobs:
           sudo pkill -f bin.js || true
           sudo rm -rf /tmp/rootfs /tmp/dsh.tar.gz
 
+      - name: Extract-test rootfs with the app's own extractor (unprivileged)
+        # The smoke tests above use `sudo tar` + chroot, which never run the
+        # app's Rust extraction path. This runs it as the unprivileged runner
+        # user against the real artifact — the exact conditions a device app
+        # hits (non-root, arm64). A failure here is a device failure.
+        run: |
+          rustup toolchain install stable --profile minimal
+          cd rust
+          cargo build --release --example verify_extract
+          rm -rf /tmp/rootfs-extract
+          SHA=$(cat /tmp/rootfs-out/debian.tar.xz.sha256)
+          ./target/release/examples/verify_extract \
+            /tmp/rootfs-out/debian.tar.xz /tmp/rootfs-extract "$SHA"
+          ls /tmp/rootfs-extract/bin/sh
+          rm -rf /tmp/rootfs-extract
+
       - name: Upload rootfs artifact
         uses: actions/upload-artifact@v5
         with:

@@ -168,9 +168,22 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun ensureAssetsExtracted(onProgress: (String) -> Unit): String? {
-        // ~1.5GB free is enough for the extracted rootfs (~1GB) + dsh package
-        if (StatFs(filesDir.absolutePath).availableBytes < 1_500_000_000L) {
-            return "Insufficient storage: ~1.5GB of free space is required."
+        // Real writable space on the filesystem holding filesDir. Per the
+        // Android docs getAvailableBytes() (statvfs.f_bavail) is "the number
+        // of bytes that are free on the file system and available to
+        // applications" — the correct standard API for a writability check.
+        // Use max(f_bavail, f_bfree) so a filesystem with reserved blocks
+        // doesn't under-report (f_bfree includes root-reserved blocks, which
+        // on a per-app-runtime device can be reclaimed).
+        val stat = StatFs(filesDir.absolutePath)
+        val usable = maxOf(stat.availableBytes, stat.freeBytes)
+        if (usable < 1_500_000_000L) {
+            AppLog.e(
+                "Main",
+                "storage check failed: available=${stat.availableBytes} free=${stat.freeBytes} usable=$usable",
+            )
+            return "Insufficient storage: ~1.5GB of free space is required " +
+                "(found ${usable / 1_000_000_000.0}GB free)."
         }
         // rootfs: assets/rootfs/debian.tar.xz + .sha256 → files/rootfs/debian.
         // The .sha256 assets are bare 64-hex hashes (see build-rootfs.sh / CI).
@@ -179,8 +192,10 @@ class MainActivity : ComponentActivity() {
             onProgress("Extracting rootfs (~1GB)…")
             copyAssetToFile("rootfs/debian.tar.xz", rootfsTar)
             val sha = assets.open("rootfs/debian.tar.xz.sha256").bufferedReader().use { it.readText().trim() }
+            AppLog.i("Main", "extracting rootfs: tar=${rootfsTar.length()}B sha=$sha")
             val rc = NativeLib.extractVerified(rootfsTar.absolutePath, sha, File(filesDir, "rootfs/debian").absolutePath)
-            if (rc != 0) return "Rootfs extraction failed (rc=$rc). ~1.5GB of free storage is required."
+            if (rc != 0) return extractError("rootfs", rc)
+            rootfsTar.delete() // free the temporary archive now, not at next boot
             stampExecAttributes(File(filesDir, "rootfs/debian"))
         }
         // dsh package: assets/dsh/dsh-arm64-0.1.0-rc.6.tar.gz + .sha256 → files/dsh
@@ -189,11 +204,29 @@ class MainActivity : ComponentActivity() {
             onProgress("Extracting dsh package…")
             copyAssetToFile("dsh/dsh-arm64-0.1.0-rc.6.tar.gz", dshTar)
             val sha = assets.open("dsh/dsh-arm64-0.1.0-rc.6.tar.gz.sha256").bufferedReader().use { it.readText().trim() }
+            AppLog.i("Main", "extracting dsh: tar=${dshTar.length()}B sha=$sha")
             val rc = NativeLib.extractVerified(dshTar.absolutePath, sha, File(filesDir, "dsh").absolutePath)
-            if (rc != 0) return "dsh package extraction failed (rc=$rc)."
+            if (rc != 0) return extractError("dsh package", rc)
+            dshTar.delete()
             stampExecAttributes(File(filesDir, "dsh"))
         }
         return null
+    }
+
+    // NativeLib.extractVerified error codes (see jni-bridge lib.rs):
+    // -1 = unexpected failure, -2 = sha256 mismatch, -3 = extraction error,
+    // -4 = IO/cleanup error. The exact error string is retained by the Rust
+    // side and surfaced via NativeLib.lastExtractError() so the UI shows the
+    // real cause instead of a blanket code.
+    private fun extractError(what: String, rc: Int): String {
+        val detail = NativeLib.lastExtractError().ifEmpty { null }
+        val hint = when (rc) {
+            -2 -> "the packaged archive is corrupt (sha256 mismatch) — reinstall the app"
+            -3 -> "extraction failed"
+            -4 -> "cleanup/IO failed"
+            else -> "unexpected failure (rc=$rc)"
+        }
+        return "$what $hint." + (detail?.let { "\n$it" } ?: "")
     }
 
     // Best-effort Android 15+ compatibility (harness-mobile SnapshotExtractor
