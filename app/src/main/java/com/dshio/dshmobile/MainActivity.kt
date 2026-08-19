@@ -9,20 +9,30 @@ import android.os.StatFs
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.BottomAppBar
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.dshio.dshmobile.ui.ExtractScreen
 import com.dshio.dshmobile.ui.TerminalScreen
 import com.dshio.dshmobile.ui.WebviewScreen
+import com.dshio.dshmobile.ui.theme.DeepCodeTheme
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -58,15 +68,11 @@ class MainActivity : ComponentActivity() {
             notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
         setContent {
-            MaterialTheme {
+            DeepCodeTheme {
                 if (state is AppState.Ready) {
                     Scaffold(
-                        bottomBar = {
-                            BottomAppBar {
-                                TextButton(onClick = { tab = 0 }) { Text("Harness") }
-                                TextButton(onClick = { tab = 1 }) { Text("Terminal") }
-                            }
-                        },
+                        containerColor = MaterialTheme.colorScheme.background,
+                        bottomBar = { NavBar(tab = tab, onSelect = { tab = it }) },
                     ) { padding ->
                         if (tab == 0) {
                             WebviewScreen(Modifier.fillMaxSize().padding(padding))
@@ -82,7 +88,7 @@ class MainActivity : ComponentActivity() {
                     }
                 } else {
                     ExtractScreen(
-                        progressText = (state as? AppState.Extracting)?.text ?: "Starting…",
+                        progressText = (state as? AppState.Extracting)?.text ?: "Starting\u2026",
                         error = (state as? AppState.Error)?.message,
                         onRetry = { startExtract() },
                         modifier = Modifier.fillMaxSize(),
@@ -195,5 +201,46 @@ class MainActivity : ComponentActivity() {
     private fun copyAssetToFile(asset: String, target: File) {
         target.parentFile?.mkdirs()
         assets.open(asset).use { input -> target.outputStream().use { out -> input.copyTo(out) } }
+    }
+}
+
+@Composable
+private fun NavBar(tab: Int, onSelect: (Int) -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surface)
+            .navigationBarsPadding(),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            listOf("Harness" to 0, "Terminal" to 1).forEach { (label, index) ->
+                val selected = tab == index
+                Surface(
+                    onClick = { onSelect(index) },
+                    shape = RoundedCornerShape(12.dp),
+                    color = if (selected) {
+                        MaterialTheme.colorScheme.primaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.surface
+                    },
+                ) {
+                    Text(
+                        text = label,
+                        color = if (selected) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        fontSize = 13.sp,
+                        modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp),
+                    )
+                }
+            }
+        }
     }
 }

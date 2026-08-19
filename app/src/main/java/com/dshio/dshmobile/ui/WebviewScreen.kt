@@ -36,6 +36,8 @@ private class RetryingWebView(context: Context) {
     private val retryBackoff = longArrayOf(2000L)
 
     init {
+        // dark canvas before the engine paints — no white flash
+        view.setBackgroundColor(0xFF0A0E13.toInt())
         view.settings.javaScriptEnabled = true
         view.settings.domStorageEnabled = true
         // OEM WebViews do not follow the system dark theme on their own.
