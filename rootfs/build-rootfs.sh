@@ -31,6 +31,10 @@ tar xJf /tmp/node.tar.xz -C "${ROOT}/usr" --strip-components=1 --exclude="*/shar
 rm -f /tmp/node.tar.xz
 
 echo "==> prune"
+# Empty /dev: device nodes cannot be created on Android (no CAP_MKNOD) and
+# proot provides fake devices; keep only the directory for bind/mount points.
+rm -rf "${ROOT}/dev"
+mkdir "${ROOT}/dev"
 rm -rf "${ROOT}/var/lib/apt/lists" "${ROOT}/var/cache/apt" \
        "${ROOT}/usr/share/doc" "${ROOT}/usr/share/man" "${ROOT}/usr/share/locale" \
        "${ROOT}/usr/share/info" "${ROOT}/usr/share/common-licenses" \

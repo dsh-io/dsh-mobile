@@ -61,7 +61,7 @@ class DshService : Service() {
             }
             else -> {
                 restartCount = 0
-                startForeground(NOTIF_RUNNING_ID, buildNotification("Harness runtime running"))
+                startForeground(NOTIF_RUNNING_ID, buildNotification("DeepCode runtime running"))
             }
         }
         startDshInternal()
@@ -146,7 +146,7 @@ class DshService : Service() {
                 ?: "(no log yet)"
             getSystemService(NotificationManager::class.java).notify(
                 NOTIF_FATAL_ID,
-                buildNotification("dsh crashed repeatedly — last log:\n$lastLines")
+                buildNotification("DeepCode crashed repeatedly — last log:\n$lastLines")
             )
             return
         }
@@ -161,7 +161,7 @@ class DshService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         return Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle("dsh")
+            .setContentTitle("DeepCode")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.stat_notify_sync)
             .setOngoing(true)

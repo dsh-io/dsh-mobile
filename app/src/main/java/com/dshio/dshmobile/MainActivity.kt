@@ -116,7 +116,7 @@ class MainActivity : ComponentActivity() {
                     Thread.sleep(1000)
                     waited++
                 }
-                state = if (DshService.isReady) AppState.Ready else AppState.Error("dsh failed to start — see logs/dsh.log")
+                state = if (DshService.isReady) AppState.Ready else AppState.Error("DeepCode failed to start — see logs/dsh.log")
             } finally {
                 engineFlowRunning.set(false)
             }
