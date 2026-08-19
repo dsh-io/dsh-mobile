@@ -25,6 +25,9 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "0.1.0"
+        // pinned to the NDK version installed by setup-android in CI; without
+        // this AGP tries to auto-download its default NDK (license prompt → fail)
+        ndkVersion = "26.3.11579264"
         ndk { abiFilters += listOf("arm64-v8a") }
     }
 

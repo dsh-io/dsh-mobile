@@ -20,11 +20,14 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq proot
           mkdir -p /tmp/rootfs
-          # --no-same-owner/--touch: unprivileged runner cannot restore
-          # owner/mtime (Debian / is 1755); extraction correctness on
-          # Android is covered by extract.rs tests, this only smoke-runs node
-          tar xJf /tmp/rootfs-out/debian.tar.xz -C /tmp/rootfs --no-same-owner --no-same-permissions --touch
-          proot -0 -r /tmp/rootfs /usr/bin/env -i HOME=/root PATH=/usr/bin:/bin node --version
+          # sudo tar: restore modes fully (Debian / is 1755); --no-same-owner
+          # --touch: keep files owned by root and skip mtime restore. This is
+          # a runner-side smoke test — Android extraction correctness is
+          # covered by extract.rs tests; here we only run node via proot.
+          sudo tar xJf /tmp/rootfs-out/debian.tar.xz -C /tmp/rootfs --no-same-owner --touch
+          # PROOT_NO_SECCOMP: runner environments block ptrace/seccomp traps,
+          # which makes proot's seccomp accelerator segfault (signal 11)
+          PROOT_NO_SECCOMP=1 proot -0 -r /tmp/rootfs /usr/bin/env -i HOME=/root PATH=/usr/bin:/bin node --version
           rm -rf /tmp/rootfs
 
       - name: Upload rootfs artifact
@@ -54,6 +57,9 @@ jobs:
           rustup toolchain install stable
           rustup target add aarch64-linux-android
           cargo install cargo-ndk --locked
+
+      - name: Rust host tests (fail fast, before heavy builds)
+        run: cd rust && cargo test --workspace
 
       - name: Build proot binary
         run: |
@@ -106,11 +112,10 @@ jobs:
           unzip -l "$APK" | grep -E "assets/(rootfs/debian.tar.xz|dsh/dsh-arm64)"
           # noCompress regression check: .xz/.gz assets must be Stored, not
           # Defl (double compression breaks openFd() on device)
-          unzip -v "$APK" | grep -E "assets/.*\.(xz|gz)$" | grep -q Defl \
-            && (echo "!! asset double-compressed (noCompress missing)" && exit 1) || true
-
-      - name: Rust host tests
-        run: cd rust && cargo test --workspace
+          if unzip -v "$APK" | grep -E "assets/.*\.(xz|gz)$" | grep -q Defl; then
+            echo "!! asset double-compressed (noCompress missing)"
+            exit 1
+          fi
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v5
@@ -125,6 +130,16 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK (for apksigner)
+        uses: android-actions/setup-android@v4
+        with:
+          packages: "build-tools;35.0.0"
+
       - name: Download APK
         uses: actions/download-artifact@v5
         with:
