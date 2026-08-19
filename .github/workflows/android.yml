@@ -29,6 +29,32 @@ jobs:
           sudo chroot /tmp/rootfs /usr/bin/env -i HOME=/root PATH=/usr/bin:/bin node --version
           sudo rm -rf /tmp/rootfs
 
+      - name: Engine smoke test (dsh web boots inside rootfs)
+        run: |
+          mkdir -p /tmp/rootfs
+          sudo tar xJf /tmp/rootfs-out/debian.tar.xz -C /tmp/rootfs --no-same-owner --touch
+          curl -fsSL -o /tmp/dsh.tar.gz \
+            "https://github.com/dsh-io/dsh-arm64/releases/download/v0.1.0-rc.6/dsh-arm64-0.1.0-rc.6.tar.gz"
+          sudo mkdir -p /tmp/rootfs/dsh
+          sudo tar xzf /tmp/dsh.tar.gz -C /tmp/rootfs/dsh
+          # same launch contract as the app's daemon.rs: node --expose-internals
+          sudo chroot /tmp/rootfs /usr/bin/env -i HOME=/root PATH=/usr/bin:/bin \
+            nohup node --expose-internals /dsh/node_modules/@deepseek-ai/dsh/lib/bin.js web \
+            >/tmp/engine.log 2>&1 &
+          for i in $(seq 1 60); do
+            curl -fsS -o /dev/null http://127.0.0.1:3080 && break
+            sleep 2
+          done
+          curl -fsS -o /dev/null http://127.0.0.1:3080 || {
+            echo "!! engine did not come up on 127.0.0.1:3080"
+            tail -30 /tmp/engine.log
+            sudo pkill -f bin.js || true
+            exit 1
+          }
+          echo "==> engine smoke OK: 127.0.0.1:3080 responds"
+          sudo pkill -f bin.js || true
+          sudo rm -rf /tmp/rootfs /tmp/dsh.tar.gz
+
       - name: Upload rootfs artifact
         uses: actions/upload-artifact@v5
         with:
