@@ -6,7 +6,30 @@ on:
   workflow_dispatch:
 
 jobs:
+  rootfs:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build minimal rootfs
+        run: |
+          sudo ./rootfs/build-rootfs.sh /tmp/rootfs-out
+
+      - name: Smoke-test rootfs under proot (host)
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq proot
+          tar xJf /tmp/rootfs-out/debian.tar.xz -C /tmp
+          proot -0 -r /tmp/rootfs /usr/bin/env -i HOME=/root PATH=/usr/bin:/bin node --version
+          rm -rf /tmp/rootfs
+
+      - name: Upload rootfs artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: dsh-rootfs
+          path: /tmp/rootfs-out/
+
   build:
+    needs: rootfs
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -37,6 +60,27 @@ jobs:
           export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/26.3.11579264"
           cd rust && cargo ndk -t arm64-v8a -o ../app/src/main/jniLibs build --release
 
+      - name: Download rootfs artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: dsh-rootfs
+          path: /tmp/rootfs
+
+      - name: Fetch dsh-arm64 release package
+        run: |
+          mkdir -p app/src/main/assets/dsh app/src/main/assets/rootfs
+          cp /tmp/rootfs/debian.tar.xz app/src/main/assets/rootfs/
+          cp /tmp/rootfs/debian.tar.xz.sha256 app/src/main/assets/rootfs/
+          curl -fsSL -o app/src/main/assets/dsh/dsh-arm64-0.1.0-rc.6.tar.gz \
+            "https://github.com/dsh-io/dsh-arm64/releases/download/v0.1.0-rc.6/dsh-arm64-0.1.0-rc.6.tar.gz"
+          # enforce the hash pinned in the plan (fail the build on drift)
+          echo "b8aa98f46f750bd909a105434a271276baab8893e786805b5a613cfc2fb65ba6  dsh-arm64-0.1.0-rc.6.tar.gz" \
+            | sha256sum -c - || (echo "!! dsh package sha256 mismatch (pinned in plan)" && exit 1)
+          # bare 64-hex hash asset, consumed by NativeLib.extractVerified
+          echo -n "b8aa98f46f750bd909a105434a271276baab8893e786805b5a613cfc2fb65ba6" \
+            > app/src/main/assets/dsh/dsh-arm64-0.1.0-rc.6.tar.gz.sha256
+          ls -la app/src/main/assets/dsh/ app/src/main/assets/rootfs/
+
       - name: Build APK
         run: ./gradlew assembleRelease --no-daemon
         env:
@@ -53,13 +97,15 @@ jobs:
           ls -la "$APK"
           $ANDROID_SDK_ROOT/build-tools/35.0.0/aapt dump badging "$APK" | head -3
           $ANDROID_SDK_ROOT/build-tools/35.0.0/apksigner verify --print-certs "$APK" > /tmp/certs.txt
-          echo "--- signer certs ---"
-          cat /tmp/certs.txt
           grep -q "Signer #1 certificate DN" /tmp/certs.txt || (echo "APK IS NOT SIGNED" && exit 1)
+          unzip -l "$APK" | grep -E "assets/(rootfs/debian.tar.xz|dsh/dsh-arm64)"
+          # noCompress regression check: .xz/.gz assets must be Stored, not
+          # Defl (double compression breaks openFd() on device)
+          unzip -v "$APK" | grep -E "assets/.*\.(xz|gz)$" | grep -q Defl \
+            && (echo "!! asset double-compressed (noCompress missing)" && exit 1) || true
 
       - name: Rust host tests
-        run: |
-          cd rust && cargo test --workspace
+        run: cd rust && cargo test --workspace
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v5
@@ -82,7 +128,6 @@ jobs:
 
       - name: Rename with version
         run: |
-          ls -la dist/
           APK=$(ls dist/*.apk | head -1)
           mv "$APK" "dist/dsh-mobile-${GITHUB_REF_NAME}.apk"
 
