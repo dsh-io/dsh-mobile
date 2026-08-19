@@ -155,14 +155,15 @@ mod tests {
             &log,
         )
         .expect("spawn daemon");
-        // wait for the log line
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        // wait for the log line (generous deadline: cargo runs tests in
+        // parallel and slow runners can delay the child's first output)
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         loop {
             if std::fs::read_to_string(&log).map(|s| s.contains("daemon-alive")).unwrap_or(false) {
                 break;
             }
             assert!(std::time::Instant::now() < deadline, "log never got output");
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
         assert!(stop_pgid(pid));
         let r = unsafe { libc::kill(pid, 0) };
