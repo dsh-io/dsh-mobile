@@ -103,9 +103,11 @@ class MainActivity : ComponentActivity() {
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 ensureProotBinary()
-                val missing = ensureAssetsExtracted { text -> state = AppState.Extracting(text) }
+                val missing = ensureAssetsExtracted { text ->
+                    runOnUiThread { state = AppState.Extracting(text) }
+                }
                 if (missing != null) {
-                    state = AppState.Error(missing)
+                    runOnUiThread { state = AppState.Error(missing) }
                     return@launch
                 }
                 val intent = Intent(this@MainActivity, DshService::class.java)
@@ -116,7 +118,9 @@ class MainActivity : ComponentActivity() {
                     Thread.sleep(1000)
                     waited++
                 }
-                state = if (DshService.isReady) AppState.Ready else AppState.Error("DeepCode failed to start — see logs/dsh.log")
+                runOnUiThread {
+                    state = if (DshService.isReady) AppState.Ready else AppState.Error("DeepCode failed to start — see logs/dsh.log")
+                }
             } finally {
                 engineFlowRunning.set(false)
             }

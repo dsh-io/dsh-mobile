@@ -98,7 +98,7 @@ class DshService : Service() {
         }
     }
 
-    private fun supervise(pid: Int) {
+    private suspend fun supervise(pid: Int) {
         val client = OkHttpClient.Builder()
             .connectTimeout(3, TimeUnit.SECONDS)
             .readTimeout(3, TimeUnit.SECONDS)
