@@ -1,4 +1,67 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">DeepCode</string>
+
+    <!-- Bootstrap and extraction -->
+    <string name="checking_installation">Checking installation…</string>
+    <string name="starting">Starting…</string>
+    <string name="engine_startup_timed_out">Engine startup timed out — see logs/dsh.log</string>
+    <string name="unexpected_failure">Unexpected failure</string>
+    <string name="installed_proot_invalid">Installed proot is invalid</string>
+    <string name="cannot_make_proot_executable">Cannot make proot executable</string>
+    <string name="cannot_make_proot_read_only">Cannot make proot read-only</string>
+    <string name="cannot_clean_stale_proot">Cannot clean stale proot.tmp</string>
+    <string name="cannot_install_proot_atomically">Cannot install proot atomically</string>
+    <string name="cannot_clean_stale_extraction">Cannot clean stale extraction file: %1$s</string>
+    <string name="insufficient_storage">Insufficient storage: ~%1$.1fGB of free space is required (found %2$.1fGB free).</string>
+    <string name="extracting_rootfs">Extracting rootfs (~1GB)…</string>
+    <string name="extracting_dsh">Extracting dsh package…</string>
+    <string name="rootfs_name">rootfs</string>
+    <string name="dsh_package_name">dsh package</string>
+    <string name="archive_corrupt">the packaged archive is corrupt (SHA-256 mismatch) — reinstall the app</string>
+    <string name="extraction_failed">extraction failed</string>
+    <string name="cleanup_io_failed">cleanup/IO failed</string>
+    <string name="unexpected_failure_with_code">unexpected failure (rc=%1$d)</string>
+    <string name="extract_failure_message">%1$s %2$s.</string>
+
+    <!-- Main navigation and first-run screen -->
+    <string name="nav_harness">Harness</string>
+    <string name="nav_terminal">Terminal</string>
+    <string name="nav_logs">Logs</string>
+    <string name="branding_subtitle">embedded debian · node · dsh engine</string>
+    <string name="boot_failed">BOOT FAILED</string>
+    <string name="retry">Retry</string>
+    <string name="first_launch_hint">first launch extracts the runtime — keep the app in foreground</string>
+
+    <!-- Terminal -->
+    <string name="session_exited">Session exited</string>
+    <string name="session_retry_no_seccomp">The session ended abnormally. Retry with PROOT_NO_SECCOMP (compatibility mode)?</string>
+    <string name="retry_compatibility_mode">Retry with compatibility mode</string>
+    <string name="back">Back</string>
+    <string name="rootfs_missing">Rootfs is missing: %1$s</string>
+
+    <!-- Logs -->
+    <string name="log_filter_all">ALL</string>
+    <string name="log_filter_debug">D</string>
+    <string name="log_filter_info">I</string>
+    <string name="log_filter_warning">W</string>
+    <string name="log_filter_error">E</string>
+    <string name="share">Share</string>
+    <string name="share_logs_subject">DeepCode logs</string>
+    <string name="share_logs_chooser">Share DeepCode logs</string>
+
+    <!-- Foreground service and user-visible engine failures -->
+    <string name="notification_channel_name">dsh runtime</string>
+    <string name="runtime_running">DeepCode runtime running</string>
+    <string name="runtime_stopped">Runtime stopped</string>
+    <string name="stop">Stop</string>
+    <string name="engine_failed_to_spawn">Engine failed to spawn (rc=%1$d)</string>
+    <string name="engine_process_exited">Engine process exited</string>
+    <string name="engine_became_unresponsive">Engine became unresponsive</string>
+    <string name="engine_not_ready_in_time">Engine did not become ready within 120s</string>
+    <string name="unable_to_confirm_dead">%1$s; unable to confirm the old process is dead</string>
+    <string name="engine_crashed_repeatedly">%1$s; engine crashed repeatedly</string>
+    <string name="see_engine_log">%1$s — see logs/dsh.log</string>
+    <string name="no_log_yet">(no log yet)</string>
+    <string name="log_unavailable">(log unavailable)</string>
 </resources>

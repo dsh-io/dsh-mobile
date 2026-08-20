@@ -28,6 +28,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.dshio.dshmobile.log.AppLog
@@ -69,12 +70,13 @@ class MainActivity : ComponentActivity() {
         object Ready : AppState
     }
 
-    private var state by mutableStateOf<AppState>(AppState.Extracting("Checking installation…"))
+    private var state by mutableStateOf<AppState>(AppState.Starting)
     private var tab by mutableStateOf(0)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         NativeLib.initNative(filesDir.absolutePath)
+        state = AppState.Extracting(getString(R.string.checking_installation))
         if (Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
@@ -101,7 +103,9 @@ class MainActivity : ComponentActivity() {
                     }
                 } else {
                     ExtractScreen(
-                        progressText = (state as? AppState.Extracting)?.text ?: "Starting\u2026",
+                        progressText = (state as? AppState.Extracting)?.text
+                            ?.ifEmpty { getString(R.string.starting) }
+                            ?: getString(R.string.starting),
                         error = (state as? AppState.Error)?.message,
                         onRetry = { startExtract() },
                         modifier = Modifier.fillMaxSize(),
@@ -139,7 +143,7 @@ class MainActivity : ComponentActivity() {
         CoroutineScope(Dispatchers.IO).launch {
             val t0 = System.currentTimeMillis()
             try {
-                runOnUiThread { state = AppState.Extracting("Checking installation…") }
+                runOnUiThread { state = AppState.Extracting(getString(R.string.checking_installation)) }
                 ensureProotBinary()
                 val missing = ensureAssetsExtracted { text ->
                     runOnUiThread { state = AppState.Extracting(text) }
@@ -171,14 +175,14 @@ class MainActivity : ComponentActivity() {
                         AppState.Ready
                     } else {
                         val detail = DshService.fatalError
-                            ?: "Engine startup timed out — see logs/dsh.log"
+                            ?: getString(R.string.engine_startup_timed_out)
                         AppLog.e("Main", "engine not ready (pid=${DshService.runningPid}): $detail")
                         AppState.Error(detail)
                     }
                 }
             } catch (e: Exception) {
                 AppLog.e("Main", "bootstrap threw: $e")
-                runOnUiThread { state = AppState.Error(e.message ?: "Unexpected failure") }
+                runOnUiThread { state = AppState.Error(e.message ?: getString(R.string.unexpected_failure)) }
             } finally {
                 ownsEngineFlow = false
                 engineFlowRunning.set(false)
@@ -193,26 +197,26 @@ class MainActivity : ComponentActivity() {
         // overwriting it would EACCES forever (reinstall-without-clear,
         // harness-mobile ProotRuntime pattern).
         if (target.exists()) {
-            check(target.isFile && target.length() > 0) { "Installed proot is invalid" }
+            check(target.isFile && target.length() > 0) { getString(R.string.installed_proot_invalid) }
             // Repair permissions from older/interrupted app versions without
             // ever overwriting the existing ELF.
-            check(target.setExecutable(true)) { "Cannot make proot executable" }
-            check(target.setWritable(false, false)) { "Cannot make proot read-only" }
+            check(target.setExecutable(true)) { getString(R.string.cannot_make_proot_executable) }
+            check(target.setWritable(false, false)) { getString(R.string.cannot_make_proot_read_only) }
             return
         }
         // Copy and chmod a temporary file, then publish it atomically. A
         // force-stop halfway through the copy must never leave a truncated
         // `proot` that the skip-if-exists rule would trust forever.
         val tmp = File(dir, "proot.tmp")
-        if (tmp.exists() && !tmp.delete()) error("Cannot clean stale proot.tmp")
+        if (tmp.exists() && !tmp.delete()) error(getString(R.string.cannot_clean_stale_proot))
         try {
             assets.open("proot/proot-aarch64").use { input ->
                 tmp.outputStream().use { out -> input.copyTo(out) }
             }
-            check(tmp.setExecutable(true)) { "Cannot make proot executable" }
+            check(tmp.setExecutable(true)) { getString(R.string.cannot_make_proot_executable) }
             // W^X: strict OEMs refuse a writable app-data ELF.
-            check(tmp.setWritable(false, false)) { "Cannot make proot read-only" }
-            check(tmp.renameTo(target)) { "Cannot install proot atomically" }
+            check(tmp.setWritable(false, false)) { getString(R.string.cannot_make_proot_read_only) }
+            check(tmp.renameTo(target)) { getString(R.string.cannot_install_proot_atomically) }
         } finally {
             if (tmp.exists()) {
                 tmp.setWritable(true)
@@ -233,7 +237,7 @@ class MainActivity : ComponentActivity() {
         // copies of APK assets and are always recreated below when needed.
         listOf(rootfsTar, dshTar).forEach { stale ->
             if (stale.exists() && !stale.delete()) {
-                return "Cannot clean stale extraction file: ${stale.name}"
+                return getString(R.string.cannot_clean_stale_extraction, stale.name)
             }
         }
         // Do not reject a healthy, already-installed runtime just because
@@ -258,13 +262,16 @@ class MainActivity : ComponentActivity() {
                 "storage check failed: available=${stat.availableBytes} free=${stat.freeBytes} " +
                     "usable=$usable required=$required",
             )
-            return "Insufficient storage: ~${required / 1_000_000_000.0}GB of free space is required " +
-                "(found ${usable / 1_000_000_000.0}GB free)."
+            return getString(
+                R.string.insufficient_storage,
+                required / 1_000_000_000.0,
+                usable / 1_000_000_000.0,
+            )
         }
         // rootfs: assets/rootfs/debian.tar.xz + .sha256 → files/rootfs/debian.
         // The .sha256 assets are bare 64-hex hashes (see build-rootfs.sh / CI).
         if (!rootfsReady) {
-            onProgress("Extracting rootfs (~1GB)…")
+            onProgress(getString(R.string.extracting_rootfs))
             copyAssetToFile("rootfs/debian.tar.xz", rootfsTar)
             val sha = assets.open("rootfs/debian.tar.xz.sha256").bufferedReader().use { it.readText().trim() }
             AppLog.i("Main", "extracting rootfs: tar=${rootfsTar.length()}B sha=$sha")
@@ -275,12 +282,12 @@ class MainActivity : ComponentActivity() {
                     AppLog.w("Main", "could not delete temporary rootfs archive")
                 }
             }
-            if (rc != 0) return extractError("rootfs", rc)
+            if (rc != 0) return extractError(getString(R.string.rootfs_name), rc)
             stampExecAttributes(File(filesDir, "rootfs/debian"))
         }
         // dsh package: assets/dsh/dsh-arm64-0.1.0-rc.6.tar.gz + .sha256 → files/dsh
         if (!dshReady) {
-            onProgress("Extracting dsh package…")
+            onProgress(getString(R.string.extracting_dsh))
             copyAssetToFile("dsh/dsh-arm64-0.1.0-rc.6.tar.gz", dshTar)
             val sha = assets.open("dsh/dsh-arm64-0.1.0-rc.6.tar.gz.sha256").bufferedReader().use { it.readText().trim() }
             AppLog.i("Main", "extracting dsh: tar=${dshTar.length()}B sha=$sha")
@@ -291,7 +298,7 @@ class MainActivity : ComponentActivity() {
                     AppLog.w("Main", "could not delete temporary dsh archive")
                 }
             }
-            if (rc != 0) return extractError("dsh package", rc)
+            if (rc != 0) return extractError(getString(R.string.dsh_package_name), rc)
             stampExecAttributes(File(filesDir, "dsh"))
         }
         return null
@@ -305,12 +312,12 @@ class MainActivity : ComponentActivity() {
     private fun extractError(what: String, rc: Int): String {
         val detail = NativeLib.lastExtractError().ifEmpty { null }
         val hint = when (rc) {
-            -2 -> "the packaged archive is corrupt (sha256 mismatch) — reinstall the app"
-            -3 -> "extraction failed"
-            -4 -> "cleanup/IO failed"
-            else -> "unexpected failure (rc=$rc)"
+            -2 -> getString(R.string.archive_corrupt)
+            -3 -> getString(R.string.extraction_failed)
+            -4 -> getString(R.string.cleanup_io_failed)
+            else -> getString(R.string.unexpected_failure_with_code, rc)
         }
-        return "$what $hint." + (detail?.let { "\n$it" } ?: "")
+        return getString(R.string.extract_failure_message, what, hint) + (detail?.let { "\n$it" } ?: "")
     }
 
     // Best-effort Android 15+ compatibility (harness-mobile SnapshotExtractor
@@ -386,7 +393,11 @@ private fun NavBar(tab: Int, onSelect: (Int) -> Unit) {
                 .padding(horizontal = 12.dp, vertical = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            listOf("Harness" to 0, "Terminal" to 1, "Logs" to 2).forEach { (label, index) ->
+            listOf(
+                stringResource(R.string.nav_harness) to 0,
+                stringResource(R.string.nav_terminal) to 1,
+                stringResource(R.string.nav_logs) to 2,
+            ).forEach { (label, index) ->
                 val selected = tab == index
                 Surface(
                     onClick = { onSelect(index) },

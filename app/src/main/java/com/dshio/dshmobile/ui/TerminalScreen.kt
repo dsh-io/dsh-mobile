@@ -16,6 +16,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.viewinterop.AndroidView
 import com.dshio.dshmobile.NativeLib
 import com.dshio.dshmobile.log.AppLog
@@ -82,17 +83,17 @@ fun TerminalScreen(
     if (showRetryDialog) {
         AlertDialog(
             onDismissRequest = { onExit() },
-            title = { Text("Session exited") },
-            text = { Text("The session ended abnormally. Retry with PROOT_NO_SECCOMP (compatibility mode)?") },
+            title = { Text(stringResource(com.dshio.dshmobile.R.string.session_exited)) },
+            text = { Text(stringResource(com.dshio.dshmobile.R.string.session_retry_no_seccomp)) },
             confirmButton = {
                 TextButton(onClick = {
                     showRetryDialog = false
                     useNoSeccomp = true
                     attempt++
-                }) { Text("Retry with compatibility mode") }
+                }) { Text(stringResource(com.dshio.dshmobile.R.string.retry_compatibility_mode)) }
             },
             dismissButton = {
-                TextButton(onClick = { onExit() }) { Text("Back") }
+                TextButton(onClick = { onExit() }) { Text(stringResource(com.dshio.dshmobile.R.string.back)) }
             },
         )
     }
@@ -143,7 +144,7 @@ private fun TerminalViewHost(
 
             val prootPath = File(filesDir, "proot/proot").absolutePath
             val prootArgs = NativeLib.buildProotArgs(distro, shell)
-                ?: error("Rootfs is missing: $distro")
+                ?: error(ctx.getString(com.dshio.dshmobile.R.string.rootfs_missing, distro))
             val executable = if (useLinker) "/system/bin/linker64" else prootPath
             val args = if (useLinker) {
                 arrayOf(executable, prootPath) + prootArgs

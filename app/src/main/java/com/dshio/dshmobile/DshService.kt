@@ -59,7 +59,11 @@ class DshService : Service() {
         super.onCreate()
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(
-            NotificationChannel(CHANNEL_ID, "dsh runtime", NotificationManager.IMPORTANCE_LOW)
+            NotificationChannel(
+                CHANNEL_ID,
+                getString(R.string.notification_channel_name),
+                NotificationManager.IMPORTANCE_LOW,
+            )
         )
     }
 
@@ -71,7 +75,7 @@ class DshService : Service() {
                 // Publish this before touching the pid: a concurrent watchdog
                 // callback must never restart after an explicit user stop.
                 stopRequested = true
-                fatalError = "Runtime stopped"
+                fatalError = getString(R.string.runtime_stopped)
                 stopDshInternal()
                 getSystemService(NotificationManager::class.java).cancelAll()
                 stopSelf()
@@ -88,7 +92,7 @@ class DshService : Service() {
                     restartCount = 0
                 }
                 fatalError = null
-                startForeground(NOTIF_RUNNING_ID, buildNotification("DeepCode runtime running"))
+                startForeground(NOTIF_RUNNING_ID, buildNotification(getString(R.string.runtime_running)))
             }
         }
         startDshInternal()
@@ -143,7 +147,7 @@ class DshService : Service() {
                 AppLog.e("Svc", "startDsh returned pid=$pid — engine failed to spawn")
                 // Native returned no live child (fast-fail child is reaped).
                 lastStartAttemptAt = 0
-                spawnFailure = "Engine failed to spawn (rc=$pid)"
+                spawnFailure = getString(R.string.engine_failed_to_spawn, pid)
             } else {
                 runningPid = pid
                 // ACTION_STOP may have arrived while JNI was forking. Publish
@@ -199,7 +203,7 @@ class DshService : Service() {
                     status == NativeLib.PROCESS_GONE -> AppLog.e("Svc", "engine process disappeared (pid=$pid)")
                     else -> AppLog.e("Svc", "engine exited with code ${-status - 1}")
                 }
-                onCrash("Engine process exited")
+                onCrash(getString(R.string.engine_process_exited))
                 return
             }
             val up = try {
@@ -246,7 +250,10 @@ class DshService : Service() {
                 // 120s cold-boot allowance expired. Only the latter may kill
                 // a boot that never bound the port, and it is safely >=90s.
                 AppLog.e("Svc", "engine DOWN (ready=$ready) — process alive but port 3080 is not answering")
-                onCrash(if (ready) "Engine became unresponsive" else "Engine did not become ready within 120s")
+                onCrash(
+                    if (ready) getString(R.string.engine_became_unresponsive)
+                    else getString(R.string.engine_not_ready_in_time),
+                )
                 return
             }
             delay(backoff)
@@ -266,7 +273,7 @@ class DshService : Service() {
         // here, not left to poison the next start. Death ⇒ startDshInternal
         // clears the cooldown and restarts immediately.
         if (!stopDshInternal()) {
-            publishFatal("$reason; unable to confirm the old process is dead")
+            publishFatal(getString(R.string.unable_to_confirm_dead, reason))
             return
         }
         if (stopRequested) {
@@ -274,7 +281,7 @@ class DshService : Service() {
             return
         }
         if (restartCount >= 3) {
-            publishFatal("$reason; engine crashed repeatedly")
+            publishFatal(getString(R.string.engine_crashed_repeatedly, reason))
             return
         }
         restartCount++
@@ -284,14 +291,14 @@ class DshService : Service() {
 
     private fun publishFatal(reason: String) {
         AppLog.e("Svc", "fatal: $reason")
-        fatalError = "$reason — see logs/dsh.log"
+        fatalError = getString(R.string.see_engine_log, reason)
         val lastLines = try {
             File(filesDir, "logs/dsh.log")
                 .takeIf { it.exists() }
                 ?.readLines()?.takeLast(10)?.joinToString("\n")
-                ?: "(no log yet)"
+                ?: getString(R.string.no_log_yet)
         } catch (_: Exception) {
-            "(log unavailable)"
+            getString(R.string.log_unavailable)
         }
         // Replace the foreground notification in-place: leaving a second
         // stale "runtime running" notification is actively misleading.
@@ -313,13 +320,19 @@ class DshService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         return Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle("DeepCode")
+            .setContentTitle(getString(R.string.app_name))
             .setContentText(text)
             .setSmallIcon(android.R.drawable.stat_notify_sync)
             .setOngoing(true)
             .setContentIntent(open)
             .setStyle(Notification.BigTextStyle().bigText(text))
-            .addAction(Notification.Action.Builder(null, "Stop", stop).build())
+            .addAction(
+                Notification.Action.Builder(
+                    null,
+                    getString(R.string.stop),
+                    stop,
+                ).build(),
+            )
             .build()
     }
 

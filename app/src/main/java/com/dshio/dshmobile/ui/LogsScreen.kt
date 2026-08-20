@@ -22,6 +22,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -33,15 +34,13 @@ fun LogsScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val entries by AppLog.entries.collectAsState()
     var levelFilter by remember { mutableIntStateOf(0) } // min ordinal to show
-    val levels = remember {
-        listOf(
-            0 to "ALL",
-            1 to "D",
-            2 to "I",
-            3 to "W",
-            4 to "E",
-        )
-    }
+    val levels = listOf(
+        0 to stringResource(com.dshio.dshmobile.R.string.log_filter_all),
+        1 to stringResource(com.dshio.dshmobile.R.string.log_filter_debug),
+        2 to stringResource(com.dshio.dshmobile.R.string.log_filter_info),
+        3 to stringResource(com.dshio.dshmobile.R.string.log_filter_warning),
+        4 to stringResource(com.dshio.dshmobile.R.string.log_filter_error),
+    )
     val visible = remember(entries, levelFilter) {
         entries.filter { it.level.ordinal >= levelFilter }
     }
@@ -84,11 +83,19 @@ fun LogsScreen(modifier: Modifier = Modifier) {
                         val share = Intent(Intent.ACTION_SEND).apply {
                             type = "text/plain"
                             putExtra(Intent.EXTRA_STREAM, uri)
-                            putExtra(Intent.EXTRA_SUBJECT, "DeepCode logs")
+                            putExtra(
+                                Intent.EXTRA_SUBJECT,
+                                context.getString(com.dshio.dshmobile.R.string.share_logs_subject),
+                            )
                             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                         }
                         try {
-                            context.startActivity(Intent.createChooser(share, "Share DeepCode logs"))
+                            context.startActivity(
+                                Intent.createChooser(
+                                    share,
+                                    context.getString(com.dshio.dshmobile.R.string.share_logs_chooser),
+                                ),
+                            )
                         } catch (_: Exception) {
                             AppLog.w("Logs", "no app to handle log share")
                         }
@@ -98,7 +105,7 @@ fun LogsScreen(modifier: Modifier = Modifier) {
                 color = MaterialTheme.colorScheme.surface,
             ) {
                 Text(
-                    text = "Share",
+                    text = stringResource(com.dshio.dshmobile.R.string.share),
                     color = MaterialTheme.colorScheme.primary,
                     fontSize = 11.sp,
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),

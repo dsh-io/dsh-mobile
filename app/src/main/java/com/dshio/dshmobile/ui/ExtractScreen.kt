@@ -21,6 +21,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -55,14 +56,14 @@ fun ExtractScreen(
         ) {
             Spacer(Modifier.height(56.dp))
             Text(
-                text = "DeepCode",
+                text = stringResource(com.dshio.dshmobile.R.string.app_name),
                 color = MaterialTheme.colorScheme.onBackground,
                 fontSize = 30.sp,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = (-0.6).sp,
             )
             Text(
-                text = "embedded debian \u00b7 node \u00b7 dsh engine",
+                text = stringResource(com.dshio.dshmobile.R.string.branding_subtitle),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontFamily = FontFamily.Monospace,
                 fontSize = 12.sp,
@@ -83,7 +84,7 @@ fun ExtractScreen(
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text(
-                            text = "BOOT FAILED",
+                            text = stringResource(com.dshio.dshmobile.R.string.boot_failed),
                             color = MaterialTheme.colorScheme.onErrorContainer,
                             fontFamily = FontFamily.Monospace,
                             fontSize = 11.sp,
@@ -101,7 +102,9 @@ fun ExtractScreen(
                             modifier = Modifier.padding(top = 16.dp),
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
                         ) {
-                            Button(onClick = onRetry) { Text("Retry") }
+                            Button(onClick = onRetry) {
+                                Text(stringResource(com.dshio.dshmobile.R.string.retry))
+                            }
                         }
                     }
                 }
@@ -137,7 +140,7 @@ fun ExtractScreen(
                         trackColor = MaterialTheme.colorScheme.outline,
                     )
                     Text(
-                        text = "first launch extracts the runtime \u2014 keep the app in foreground",
+                        text = stringResource(com.dshio.dshmobile.R.string.first_launch_hint),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontSize = 12.sp,
                         modifier = Modifier.padding(top = 14.dp),
