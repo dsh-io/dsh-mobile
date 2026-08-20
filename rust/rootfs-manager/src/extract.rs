@@ -60,7 +60,9 @@ fn strip_write_bits(root: &Path) -> Result<(), String> {
             let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
             let mode = md.mode();
             let is_exec = mode & 0o111 != 0;
-            let is_lib = name.ends_with(".so") || name.ends_with(".node");
+            // Versioned ELF libraries are commonly named libfoo.so.1 or
+            // libfoo.so.1.2 and are often archived as writable 0644 files.
+            let is_lib = name.ends_with(".so") || name.contains(".so.") || name.ends_with(".node");
             if is_exec || is_lib {
                 let c = std::ffi::CString::new(p.as_os_str().as_bytes())
                     .map_err(|_| format!("cstring: {}", p.display()))?;
@@ -339,6 +341,7 @@ mod tests {
             &tgz,
             &[
                 ("usr/lib/libc++.so", b"ELF-LIKE", 0o600),
+                ("usr/lib/libssl.so.3", b"ELF-LIKE", 0o600),
                 ("usr/lib/pty.node", b"ELF-LIKE", 0o755),
                 ("usr/lib/libfoo.a", b"AR", 0o644),
             ],
@@ -354,6 +357,11 @@ mod tests {
             mode_of(&dest.join("usr/lib/pty.node")) & 0o222,
             0,
             ".node must be non-writable"
+        );
+        assert_eq!(
+            mode_of(&dest.join("usr/lib/libssl.so.3")) & 0o222,
+            0,
+            "versioned .so must be non-writable"
         );
         assert_ne!(
             mode_of(&dest.join("usr/lib/libfoo.a")) & 0o222,

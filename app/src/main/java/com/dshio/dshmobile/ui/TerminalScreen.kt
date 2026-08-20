@@ -1,6 +1,7 @@
 package com.dshio.dshmobile.ui
 
 import android.view.KeyEvent
+import android.os.SystemClock
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.AlertDialog
@@ -17,6 +18,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
 import com.dshio.dshmobile.NativeLib
+import com.dshio.dshmobile.log.AppLog
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
 import com.termux.view.TerminalView
@@ -37,6 +39,7 @@ fun TerminalScreen(
     var useNoSeccomp by remember { mutableStateOf(noSeccomp) }
     var useLinker by remember { mutableStateOf(false) }
     val uiScope = rememberCoroutineScope()
+    val attemptStartedAt = remember(attempt) { SystemClock.elapsedRealtime() }
 
     BackHandler { onExit() }
 
@@ -47,16 +50,26 @@ fun TerminalScreen(
             shell = shell,
             noSeccomp = useNoSeccomp,
             useLinker = useLinker,
-            onSessionFinished = { exitStatus ->
+            onSessionFinished = { exitStatus, transcript ->
                 // Termux invokes this from its process-waiter thread. Marshal
                 // Compose state changes back to the main dispatcher.
                 uiScope.launch {
-                    if (!useLinker && exitStatus != 0) {
-                        // TerminalSession cannot expose execve errno. Retry
-                        // once through linker64, matching the daemon fallback.
+                    val failedDuringStartup = exitStatus != 0 &&
+                        SystemClock.elapsedRealtime() - attemptStartedAt < 5_000L &&
+                        transcript.contains("proot", ignoreCase = true)
+                    // Termux's native launcher prints `exec("..."):
+                    // Permission denied` and exits 1 when execvp gets EACCES.
+                    // Exit code alone is ambiguous with a user's `exit 1`, so
+                    // only linker-retry the explicit launcher diagnostic.
+                    val execDenied = failedDuringStartup &&
+                        transcript.contains("exec(", ignoreCase = true) &&
+                        transcript.contains("Permission denied", ignoreCase = true)
+                    if (!useLinker && execDenied) {
+                        AppLog.w("Terminal", "direct proot exec denied; retrying through linker64")
                         useLinker = true
                         attempt++
-                    } else if (!useNoSeccomp && exitStatus != 0) {
+                    } else if (!useNoSeccomp && failedDuringStartup) {
+                        AppLog.w("Terminal", "proot startup failed; offering no-seccomp mode")
                         showRetryDialog = true
                     } else {
                         onExit()
@@ -92,7 +105,7 @@ private fun TerminalViewHost(
     shell: String,
     noSeccomp: Boolean,
     useLinker: Boolean,
-    onSessionFinished: (Int) -> Unit,
+    onSessionFinished: (Int, String) -> Unit,
 ) {
     val sessionRef = remember { arrayOfNulls<TerminalSession>(1) }
     AndroidView(
@@ -145,8 +158,14 @@ private fun TerminalViewHost(
             val sessionClient = object : TerminalSessionClient {
                 override fun onTextChanged(session: TerminalSession) {}
                 override fun onTitleChanged(session: TerminalSession) {}
-                override fun onSessionFinished(session: TerminalSession) =
-                    onSessionFinished(session.getExitStatus())
+                override fun onSessionFinished(session: TerminalSession) {
+                    val transcript = try {
+                        session.emulator?.screen?.transcriptText.orEmpty()
+                    } catch (_: Exception) {
+                        ""
+                    }
+                    onSessionFinished(session.getExitStatus(), transcript)
+                }
                 override fun onCopyTextToClipboard(session: TerminalSession, text: String) {}
                 override fun onPasteTextFromClipboard(session: TerminalSession) {}
                 override fun onBell(session: TerminalSession) {}

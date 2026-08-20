@@ -4,8 +4,10 @@ import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
+import java.time.Instant
+import java.time.LocalDateTime
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 // Unified logging for the whole app. Every AppLog call hits three sinks:
@@ -13,7 +15,7 @@ import java.util.Locale
 //      recompositions; seeded from the file tail at init so history
 //      survives app restarts),
 //   2. files/logs/app.log — rolling, MAX_FILE_BYTES per generation,
-//      MAX_GENERATIONS kept (rotate happens at init and when a write
+//      two generations kept (rotate happens at init and before a write
 //      would overflow),
 //   3. logcat mirror (tag DeepCode) for adb debugging.
 // The engine's raw output stays in files/logs/dsh.log (see DshService);
@@ -25,13 +27,21 @@ object AppLog {
 
     data class Entry(val ts: Long, val level: Level, val tag: String, val msg: String) {
         val line: String
-            get() = "${TS_FORMAT.format(Date(ts))} ${level.tag} $tag: $msg"
+            get() = "${TS_FORMAT.format(Instant.ofEpochMilli(ts))} ${level.tag} $tag: $msg"
     }
 
     private const val MAX_ENTRIES = 2000
     private const val MAX_FILE_BYTES = 512 * 1024
-    private const val MAX_GENERATIONS = 2
-    private val TS_FORMAT = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS", Locale.US)
+    // DateTimeFormatter is immutable and thread-safe. Entry.line can be read
+    // by Compose while an IO thread is writing a new log entry, so the old
+    // shared SimpleDateFormat could corrupt output or throw intermittently.
+    private val LOG_ZONE = ZoneId.systemDefault()
+    private val TS_FORMAT = DateTimeFormatter
+        .ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS", Locale.US)
+        .withZone(LOG_ZONE)
+    private val LOG_LINE = Regex(
+        "^(\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}) ([VDIWE]) ([^:]+): ?(.*)$",
+    )
 
     private val buffer = ArrayDeque<Entry>()
     private val _entries = MutableStateFlow<List<Entry>>(emptyList())
@@ -44,10 +54,17 @@ object AppLog {
         logsDir.mkdirs()
         val file = File(logsDir, "app.log")
         rotateIfNeeded(file)
-        // seed the ring from the file tail so the viewer shows history
-        if (file.exists()) {
-            file.readLines().takeLast(MAX_ENTRIES).forEach { line ->
-                buffer.addLast(parseLine(line))
+        // Seed oldest-to-newest from both generations. Rotation can happen
+        // immediately above, leaving app.log empty/nonexistent and all useful
+        // history in app.log.1. Bound while reading instead of loading both
+        // whole files into memory during process startup.
+        buffer.clear()
+        listOf(File(logsDir, "app.log.1"), file).forEach { history ->
+            if (history.exists()) {
+                history.forEachLine { line ->
+                    buffer.addLast(parseLine(line))
+                    while (buffer.size > MAX_ENTRIES) buffer.removeFirst()
+                }
             }
         }
         logFile = file
@@ -56,9 +73,9 @@ object AppLog {
     }
 
     @Synchronized
-    private fun rotateIfNeeded(file: File) {
+    private fun rotateIfNeeded(file: File, incomingBytes: Int = 0) {
         if (!file.exists()) return
-        if (file.length() < MAX_FILE_BYTES) return
+        if (file.length() + incomingBytes <= MAX_FILE_BYTES) return
         val gen1 = File(file.parentFile, "app.log.1")
         gen1.delete()
         file.renameTo(gen1)
@@ -86,9 +103,10 @@ object AppLog {
 
     private fun writeFile(entry: Entry) {
         val file = logFile ?: return
-        rotateIfNeeded(file)
+        val line = entry.line + "\n"
+        rotateIfNeeded(file, line.toByteArray(Charsets.UTF_8).size)
         try {
-            file.appendText(entry.line + "\n")
+            file.appendText(line)
         } catch (_: Exception) {
             // logging must never crash the app
         }
@@ -113,14 +131,14 @@ object AppLog {
             out.parentFile?.mkdirs()
             out.bufferedWriter().use { w ->
                 w.write("=== DeepCode log bundle ===\n")
-                w.write("generated: ${TS_FORMAT.format(Date())}\n\n")
-                w.write("----- app.log -----\n")
+                w.write("generated: ${TS_FORMAT.format(Instant.now())}\n\n")
                 val file = logFile
-                if (file != null && file.exists()) file.forEachLine { w.write(it + "\n") }
                 File(file?.parentFile, "app.log.1").takeIf { it.exists() }?.let { gen ->
-                    w.write("\n----- app.log.1 (older) -----\n")
+                    w.write("----- app.log.1 (older) -----\n")
                     gen.forEachLine { w.write(it + "\n") }
                 }
+                w.write("\n----- app.log -----\n")
+                if (file != null && file.exists()) file.forEachLine { w.write(it + "\n") }
                 val dsh = File(file?.parentFile, "dsh.log")
                 if (dsh.exists()) {
                     w.write("\n----- dsh.log (engine, last 500 lines) -----\n")
@@ -139,10 +157,18 @@ object AppLog {
     }
 
     private fun parseLine(line: String): Entry {
-        val level = line.substringAfter(' ', "")
-            .firstOrNull()
-            ?.let { c -> Level.entries.firstOrNull { it.tag == c } }
-            ?: Level.I
-        return Entry(System.currentTimeMillis(), level, "file", line)
+        val match = LOG_LINE.matchEntire(line)
+            ?: return Entry(System.currentTimeMillis(), Level.I, "file", line)
+        val (timestamp, levelTag, tag, message) = match.destructured
+        val timestampMs = try {
+            LocalDateTime.parse(timestamp, DateTimeFormatter.ISO_LOCAL_DATE_TIME)
+                .atZone(LOG_ZONE)
+                .toInstant()
+                .toEpochMilli()
+        } catch (_: Exception) {
+            System.currentTimeMillis()
+        }
+        val level = Level.entries.firstOrNull { it.tag == levelTag.single() } ?: Level.I
+        return Entry(timestampMs, level, tag, message)
     }
 }

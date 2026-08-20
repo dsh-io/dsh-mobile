@@ -7,7 +7,7 @@ Build: APK artifact from the CI `android-build` workflow.
 
 - [ ] Fresh install → extraction progress shown (rootfs, then dsh); completes without error (~1.5GB free storage needed)
 - [ ] With low free space → first-run screen shows "Insufficient storage" error; retry after freeing space works
-- [ ] Foreground notification appears ("Harness runtime running") with a Stop button
+- [ ] Foreground notification appears ("DeepCode runtime running") with a Stop button; tapping its body reopens the app
 - [ ] WebView shows the dsh web UI at 127.0.0.1:3080 (chat screen visible)
 - [ ] `dsh.log` has no `MODULE_NOT_FOUND` for the app-private dsh package (the `/root/dsh` bind is active)
 - [ ] Notification permission prompt shown on API 33+; denied still works (service degrades gracefully)
@@ -20,8 +20,11 @@ Build: APK artifact from the CI `android-build` workflow.
 - [ ] Swipe app from recents → foreground service survives; notification stays; dsh keeps running
 - [ ] Reopen app → WebView reconnects to the running service (no re-extract, no restart)
 - [ ] Stop via the notification's Stop button → notification gone, service stopped, no orphan proot (`adb shell ps -A | grep proot` empty)
+- [ ] Stop during a cold boot → the just-forked process is terminated and the watchdog does not restart it
 - [ ] Crash recovery: `adb shell kill -9 <proot pid>` → service auto-restarts dsh, WebView reconnects
+- [ ] Kill the app process while the service is sticky, then let Android recreate it without opening the Activity → JNI initializes and the engine boots (no `initNative must be called first` panic)
 - [ ] Repeated failures (kill dsh 4 times in a row: 3 auto-restarts + 1 final crash) → persistent notification with the last log lines appears
+- [ ] A single transient health-probe failure does not kill a healthy engine; three consecutive failures do
 
 ## Terminal tab
 
@@ -30,7 +33,8 @@ Build: APK artifact from the CI `android-build` workflow.
 - [ ] `node --version` prints v22.x (glibc node)
 - [ ] Rotation/resize: `stty size` reports new size after rotating
 - [ ] Back button closes the terminal session; process group reaped
-- [ ] Non-zero session exit offers "Retry with compatibility mode" (PROOT_NO_SECCOMP)
+- [ ] Typing `exit 1` immediately closes the terminal without an automatic linker retry
+- [ ] A real proot startup failure offers "Retry with compatibility mode" (PROOT_NO_SECCOMP)
 
 ## Device compatibility (learned from the deprecated harness-mobile project)
 

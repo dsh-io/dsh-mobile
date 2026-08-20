@@ -65,13 +65,64 @@ pub fn spawn_daemon(
     env: &[String],
     log_path: &Path,
 ) -> Result<libc::pid_t, String> {
+    // Android's JVM process is multi-threaded. Between fork and exec the
+    // child may only use async-signal-safe operations: Rust allocation,
+    // CString construction, and filesystem helpers can deadlock on locks
+    // held by a thread that did not survive fork. Prepare everything first.
+    if let Some(dir) = log_path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("mkdir log dir: {e}"))?;
+    }
+    let log_c = std::ffi::CString::new(log_path.as_os_str().as_bytes())
+        .map_err(|_| "log path contains NUL".to_string())?;
+    let prog_c = std::ffi::CString::new(prog).map_err(|_| "program contains NUL".to_string())?;
+    let argv_c: Vec<std::ffi::CString> = argv
+        .iter()
+        .map(|arg| {
+            std::ffi::CString::new(arg.as_str()).map_err(|_| "argument contains NUL".to_string())
+        })
+        .collect::<Result<_, _>>()?;
+    let mut argv_p: Vec<*const libc::c_char> = argv_c.iter().map(|c| c.as_ptr()).collect();
+    argv_p.push(std::ptr::null());
+    let env_c: Vec<std::ffi::CString> = env
+        .iter()
+        .map(|entry| {
+            std::ffi::CString::new(entry.as_str())
+                .map_err(|_| "environment entry contains NUL".to_string())
+        })
+        .collect::<Result<_, _>>()?;
+    let mut env_p: Vec<*const libc::c_char> = env_c.iter().map(|c| c.as_ptr()).collect();
+    env_p.push(std::ptr::null());
+    let linker = std::ffi::CString::new("/system/bin/linker64").expect("static linker path");
+    let mut argv_linker: Vec<*const libc::c_char> = Vec::with_capacity(argv_p.len() + 1);
+    argv_linker.push(linker.as_ptr());
+    argv_linker.extend(argv_p.iter().copied()); // argv_p already ends with null
+    let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND;
+    let log_fd = unsafe { libc::open(log_c.as_ptr(), flags, 0o644) };
+
     unsafe {
+        let parent_pid = libc::getpid();
         let pid = libc::fork();
         if pid < 0 {
+            if log_fd >= 0 {
+                libc::close(log_fd);
+            }
             return Err(format!("fork: {}", std::io::Error::last_os_error()));
         }
         if pid == 0 {
-            libc::setsid();
+            // Do not leave an orphan proot/node tree if Android kills the app
+            // process. The parent check closes the race where it dies between
+            // fork() and PR_SET_PDEATHSIG.
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0
+                || libc::getppid() != parent_pid
+            {
+                libc::_exit(126);
+            }
+            if libc::setsid() < 0 {
+                // stop_pgid relies on pid also being the process-group id.
+                // Running without a new session would make shutdown hang or
+                // signal an unrelated group after pid reuse.
+                libc::_exit(126);
+            }
             let devnull = libc::open(
                 b"/dev/null\0".as_ptr() as *const libc::c_char,
                 libc::O_RDONLY,
@@ -80,42 +131,19 @@ pub fn spawn_daemon(
                 libc::dup2(devnull, 0);
                 libc::close(devnull);
             }
-            if let Some(dir) = log_path.parent() {
-                let _ = std::fs::create_dir_all(dir);
-            }
-            let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND;
-            // CString, not to_string_lossy().as_ptr(): the Cow from
-            // to_string_lossy() is dropped at the end of the statement,
-            // leaving open() with a dangling pointer — the log fd silently
-            // never opens (flaky 'log never got output' in the daemon test).
-            let log_c = std::ffi::CString::new(log_path.as_os_str().as_bytes()).unwrap();
-            let log_fd = libc::open(log_c.as_ptr(), flags, 0o644);
             if log_fd >= 0 {
                 libc::dup2(log_fd, 1);
                 libc::dup2(log_fd, 2);
                 libc::close(log_fd);
             }
-            let prog_c = std::ffi::CString::new(prog).unwrap();
-            let argv_c: Vec<std::ffi::CString> = argv
-                .iter()
-                .map(|a| std::ffi::CString::new(a.as_str()).unwrap())
-                .collect();
-            let mut argv_p: Vec<*const libc::c_char> = argv_c.iter().map(|c| c.as_ptr()).collect();
-            argv_p.push(std::ptr::null());
-            let env_c: Vec<std::ffi::CString> = env
-                .iter()
-                .map(|e| std::ffi::CString::new(e.as_str()).unwrap())
-                .collect();
-            let mut env_p: Vec<*const libc::c_char> = env_c.iter().map(|c| c.as_ptr()).collect();
-            env_p.push(std::ptr::null());
             libc::execve(prog_c.as_ptr(), argv_p.as_ptr(), env_p.as_ptr());
             if std::io::Error::last_os_error().raw_os_error() == Some(libc::EACCES) {
-                let linker = std::ffi::CString::new("/system/bin/linker64").unwrap();
-                let mut argv_linker: Vec<*const libc::c_char> = vec![linker.as_ptr()];
-                argv_linker.extend(argv_p.iter().cloned()); // argv_p ends with null
                 libc::execve(linker.as_ptr(), argv_linker.as_ptr(), env_p.as_ptr());
             }
             libc::_exit(127);
+        }
+        if log_fd >= 0 {
+            libc::close(log_fd);
         }
         Ok(pid)
     }

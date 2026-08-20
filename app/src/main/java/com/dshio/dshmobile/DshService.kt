@@ -24,8 +24,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 class DshService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var pollJob: Job? = null
-    private var restartCount = 0
+    @Volatile private var pollJob: Job? = null
+    @Volatile private var restartCount = 0
 
     companion object {
         const val CHANNEL_ID = "dsh"
@@ -35,6 +35,7 @@ class DshService : Service() {
         @Volatile var runningPid: Int = -1
         @Volatile var isReady: Boolean = false
         @Volatile var fatalError: String? = null
+        @Volatile var stopRequested: Boolean = false
 
         // Double-start protection (device-verified in the deprecated
         // harness-mobile project: a second proot/node start while the first
@@ -42,6 +43,12 @@ class DshService : Service() {
         // watchdog restarts a corpse forever).
         const val START_COOLDOWN_MS = 90_000L
         const val NEVER_READY_TIMEOUT_MS = 120_000L
+        const val HEALTH_FAILURE_THRESHOLD = 3
+        const val HEALTH_RETRY_DELAY_MS = 2_000L
+        // A single successful HTTP response is not proof of a stable boot:
+        // engines that bind briefly and crash would otherwise reset the
+        // retry budget forever. Recover the budget only after sustained use.
+        const val RESTART_BUDGET_RESET_MS = 5 * 60_000L
         val STARTING = AtomicBoolean(false)
         @Volatile var lastStartAttemptAt: Long = 0
     }
@@ -61,6 +68,9 @@ class DshService : Service() {
         when (intent?.action) {
             ACTION_STOP -> {
                 AppLog.i("Svc", "STOP requested")
+                // Publish this before touching the pid: a concurrent watchdog
+                // callback must never restart after an explicit user stop.
+                stopRequested = true
                 fatalError = "Runtime stopped"
                 stopDshInternal()
                 getSystemService(NotificationManager::class.java).cancelAll()
@@ -68,7 +78,15 @@ class DshService : Service() {
                 return START_NOT_STICKY
             }
             else -> {
-                restartCount = 0
+                stopRequested = false
+                // Only a deliberate fresh ACTION_START after a published
+                // fatal state grants a new retry budget. Activity re-entry
+                // while an engine is already running must not erase crash
+                // history and turn a brief-start crash loop into infinity.
+                if (intent?.action == ACTION_START && runningPid <= 0 && fatalError != null) {
+                    AppLog.i("Svc", "explicit retry after fatal state; resetting restart budget")
+                    restartCount = 0
+                }
                 fatalError = null
                 startForeground(NOTIF_RUNNING_ID, buildNotification("DeepCode runtime running"))
             }
@@ -78,6 +96,10 @@ class DshService : Service() {
     }
 
     private fun startDshInternal() {
+        if (stopRequested) {
+            AppLog.d("Svc", "startDshInternal: explicit stop is pending")
+            return
+        }
         // Single-flight: only one caller actually starts the engine; the
         // losing caller returns immediately (system restart + activity
         // ACTION_START + crash-retry can overlap).
@@ -87,6 +109,7 @@ class DshService : Service() {
         }
         var spawnFailure: String? = null
         try {
+            if (stopRequested) return
             if (runningPid > 0) {
                 AppLog.d("Svc", "startDshInternal: already running (pid=$runningPid)")
                 return
@@ -123,6 +146,13 @@ class DshService : Service() {
                 spawnFailure = "Engine failed to spawn (rc=$pid)"
             } else {
                 runningPid = pid
+                // ACTION_STOP may have arrived while JNI was forking. Publish
+                // the pid first so either side can stop it, then honor stop.
+                if (stopRequested) {
+                    AppLog.i("Svc", "engine spawned during STOP; terminating pid=$pid")
+                    stopDshInternal()
+                    return
+                }
                 AppLog.i("Svc", "engine spawned pid=$pid (restartCount=$restartCount)")
                 pollJob?.cancel()
                 pollJob = scope.launch { supervise(pid) }
@@ -153,6 +183,8 @@ class DshService : Service() {
             .build()
         val request = Request.Builder().url("http://127.0.0.1:3080").build()
         var ready = false
+        var readySince = 0L
+        var healthFailures = 0
         var backoff = 1000L
         val neverReadyDeadline = SystemClock.elapsedRealtime() + NEVER_READY_TIMEOUT_MS
         while (runningPid == pid) {
@@ -161,6 +193,7 @@ class DshService : Service() {
             // the process we actually own and create false readiness.
             val status = NativeLib.reapExitStatus(pid)
             if (status != NativeLib.PROCESS_RUNNING) {
+                isReady = false
                 when {
                     status > 0 -> AppLog.e("Svc", "engine died with signal $status (SIGSEGV=11 SIGABRT=6 SIGKILL=9)")
                     status == NativeLib.PROCESS_GONE -> AppLog.e("Svc", "engine process disappeared (pid=$pid)")
@@ -170,19 +203,42 @@ class DshService : Service() {
                 return
             }
             val up = try {
-                client.newCall(request).execute().use { it.code == 200 }
+                client.newCall(request).execute().use { it.isSuccessful }
             } catch (_: Exception) {
                 false
             }
+            // Cancellation does not interrupt OkHttp's synchronous execute().
+            // A stopped/old supervisor must not publish readiness after STOP
+            // or after a replacement pid has already been installed.
+            if (runningPid != pid || stopRequested) return
             if (up) {
-                if (!ready) AppLog.i("Svc", "engine became ready on 127.0.0.1:3080 (pid=$pid)")
+                if (!ready) {
+                    readySince = SystemClock.elapsedRealtime()
+                    AppLog.i("Svc", "engine became ready on 127.0.0.1:3080 (pid=$pid)")
+                }
                 ready = true
+                healthFailures = 0
                 isReady = true
-                // The retry budget counts consecutive failed boots, not
-                // unrelated crashes separated by a healthy run.
-                restartCount = 0
+                if (
+                    restartCount > 0 &&
+                    SystemClock.elapsedRealtime() - readySince >= RESTART_BUDGET_RESET_MS
+                ) {
+                    AppLog.i("Svc", "engine stable for 5m; resetting restart budget")
+                    restartCount = 0
+                }
                 delay(5000) // healthy: re-check every 5s to catch crashes
                 continue
+            }
+            if (ready) {
+                healthFailures++
+                if (healthFailures < HEALTH_FAILURE_THRESHOLD) {
+                    AppLog.w(
+                        "Svc",
+                        "health probe failed $healthFailures/$HEALTH_FAILURE_THRESHOLD; confirming before restart",
+                    )
+                    delay(HEALTH_RETRY_DELAY_MS)
+                    continue
+                }
             }
             isReady = false
             if (ready || SystemClock.elapsedRealtime() >= neverReadyDeadline) {
@@ -199,6 +255,11 @@ class DshService : Service() {
     }
 
     private fun onCrash(reason: String) {
+        if (stopRequested) {
+            AppLog.i("Svc", "suppressing crash restart after explicit STOP: $reason")
+            stopDshInternal()
+            return
+        }
         // stopDshInternal confirms death: stop_pgid SIGTERMs the group and
         // escalates to SIGKILL after 3s, so a hung process holding port 3080
         // (the EADDRINUSE corpse-loop case from harness-mobile) is killed
@@ -206,6 +267,10 @@ class DshService : Service() {
         // clears the cooldown and restarts immediately.
         if (!stopDshInternal()) {
             publishFatal("$reason; unable to confirm the old process is dead")
+            return
+        }
+        if (stopRequested) {
+            AppLog.i("Svc", "STOP arrived while handling crash; restart suppressed")
             return
         }
         if (restartCount >= 3) {
@@ -237,6 +302,11 @@ class DshService : Service() {
     }
 
     private fun buildNotification(text: String): Notification {
+        val open = PendingIntent.getActivity(
+            this, 1,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
         val stop = PendingIntent.getService(
             this, 0,
             Intent(this, DshService::class.java).setAction(ACTION_STOP),
@@ -247,6 +317,8 @@ class DshService : Service() {
             .setContentText(text)
             .setSmallIcon(android.R.drawable.stat_notify_sync)
             .setOngoing(true)
+            .setContentIntent(open)
+            .setStyle(Notification.BigTextStyle().bigText(text))
             .addAction(Notification.Action.Builder(null, "Stop", stop).build())
             .build()
     }
@@ -273,6 +345,9 @@ class DshService : Service() {
 
     override fun onDestroy() {
         AppLog.i("Svc", "service destroyed")
+        // Close the same spawn race as ACTION_STOP: onDestroy can run while
+        // startDsh is still inside JNI and runningPid has not been published.
+        stopRequested = true
         stopDshInternal()
         scope.cancel()
         super.onDestroy()

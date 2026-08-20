@@ -192,7 +192,14 @@ class MainActivity : ComponentActivity() {
         // Skip if present: the binary was made read-only by W^X below, so
         // overwriting it would EACCES forever (reinstall-without-clear,
         // harness-mobile ProotRuntime pattern).
-        if (target.exists()) return
+        if (target.exists()) {
+            check(target.isFile && target.length() > 0) { "Installed proot is invalid" }
+            // Repair permissions from older/interrupted app versions without
+            // ever overwriting the existing ELF.
+            check(target.setExecutable(true)) { "Cannot make proot executable" }
+            check(target.setWritable(false, false)) { "Cannot make proot read-only" }
+            return
+        }
         // Copy and chmod a temporary file, then publish it atomically. A
         // force-stop halfway through the copy must never leave a truncated
         // `proot` that the skip-if-exists rule would trust forever.
@@ -215,8 +222,20 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun ensureAssetsExtracted(onProgress: (String) -> Unit): String? {
-        val rootfsReady = File(filesDir, "rootfs/debian/bin/sh").exists()
-        val dshReady = File(filesDir, "dsh/node_modules/@deepseek-ai/dsh/lib/bin.js").exists()
+        val rootfsShell = File(filesDir, "rootfs/debian/bin/sh")
+        val dshEntry = File(filesDir, "dsh/node_modules/@deepseek-ai/dsh/lib/bin.js")
+        val rootfsReady = rootfsShell.isFile && rootfsShell.canExecute()
+        val dshReady = dshEntry.isFile && dshEntry.canRead()
+        val rootfsTar = File(filesDir, "downloads/rootfs.tar.xz")
+        val dshTar = File(filesDir, "downloads/dsh.tar.gz")
+        // Failed or interrupted extraction attempts must not permanently
+        // consume the free space required by Retry. These are disposable
+        // copies of APK assets and are always recreated below when needed.
+        listOf(rootfsTar, dshTar).forEach { stale ->
+            if (stale.exists() && !stale.delete()) {
+                return "Cannot clean stale extraction file: ${stale.name}"
+            }
+        }
         // Do not reject a healthy, already-installed runtime just because
         // extraction consumed most of the initially available free space.
         if (rootfsReady && dshReady) return null
@@ -225,42 +244,54 @@ class MainActivity : ComponentActivity() {
         // Android docs getAvailableBytes() (statvfs.f_bavail) is "the number
         // of bytes that are free on the file system and available to
         // applications" — the correct standard API for a writability check.
-        // Use max(f_bavail, f_bfree) so a filesystem with reserved blocks
-        // doesn't under-report (f_bfree includes root-reserved blocks, which
-        // on a per-app-runtime device can be reclaimed).
+        // freeBytes includes blocks reserved from applications; using it can
+        // overestimate writable space and start an extraction that must fail.
         val stat = StatFs(filesDir.absolutePath)
-        val usable = maxOf(stat.availableBytes, stat.freeBytes)
-        if (usable < 1_500_000_000L) {
+        val usable = stat.availableBytes
+        // Rootfs extraction needs room for both its compressed asset and the
+        // expanded tree. A missing dsh package alone is much smaller and must
+        // not reject an otherwise healthy install with a blanket 1.5GB gate.
+        val required = if (!rootfsReady) 1_500_000_000L else 300_000_000L
+        if (usable < required) {
             AppLog.e(
                 "Main",
-                "storage check failed: available=${stat.availableBytes} free=${stat.freeBytes} usable=$usable",
+                "storage check failed: available=${stat.availableBytes} free=${stat.freeBytes} " +
+                    "usable=$usable required=$required",
             )
-            return "Insufficient storage: ~1.5GB of free space is required " +
+            return "Insufficient storage: ~${required / 1_000_000_000.0}GB of free space is required " +
                 "(found ${usable / 1_000_000_000.0}GB free)."
         }
         // rootfs: assets/rootfs/debian.tar.xz + .sha256 → files/rootfs/debian.
         // The .sha256 assets are bare 64-hex hashes (see build-rootfs.sh / CI).
-        val rootfsTar = File(filesDir, "downloads/rootfs.tar.xz")
         if (!rootfsReady) {
             onProgress("Extracting rootfs (~1GB)…")
             copyAssetToFile("rootfs/debian.tar.xz", rootfsTar)
             val sha = assets.open("rootfs/debian.tar.xz.sha256").bufferedReader().use { it.readText().trim() }
             AppLog.i("Main", "extracting rootfs: tar=${rootfsTar.length()}B sha=$sha")
-            val rc = NativeLib.extractVerified(rootfsTar.absolutePath, sha, File(filesDir, "rootfs/debian").absolutePath)
+            val rc = try {
+                NativeLib.extractVerified(rootfsTar.absolutePath, sha, File(filesDir, "rootfs/debian").absolutePath)
+            } finally {
+                if (rootfsTar.exists() && !rootfsTar.delete()) {
+                    AppLog.w("Main", "could not delete temporary rootfs archive")
+                }
+            }
             if (rc != 0) return extractError("rootfs", rc)
-            rootfsTar.delete() // free the temporary archive now, not at next boot
             stampExecAttributes(File(filesDir, "rootfs/debian"))
         }
         // dsh package: assets/dsh/dsh-arm64-0.1.0-rc.6.tar.gz + .sha256 → files/dsh
-        val dshTar = File(filesDir, "downloads/dsh.tar.gz")
         if (!dshReady) {
             onProgress("Extracting dsh package…")
             copyAssetToFile("dsh/dsh-arm64-0.1.0-rc.6.tar.gz", dshTar)
             val sha = assets.open("dsh/dsh-arm64-0.1.0-rc.6.tar.gz.sha256").bufferedReader().use { it.readText().trim() }
             AppLog.i("Main", "extracting dsh: tar=${dshTar.length()}B sha=$sha")
-            val rc = NativeLib.extractVerified(dshTar.absolutePath, sha, File(filesDir, "dsh").absolutePath)
+            val rc = try {
+                NativeLib.extractVerified(dshTar.absolutePath, sha, File(filesDir, "dsh").absolutePath)
+            } finally {
+                if (dshTar.exists() && !dshTar.delete()) {
+                    AppLog.w("Main", "could not delete temporary dsh archive")
+                }
+            }
             if (rc != 0) return extractError("dsh package", rc)
-            dshTar.delete()
             stampExecAttributes(File(filesDir, "dsh"))
         }
         return null
