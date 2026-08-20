@@ -12,6 +12,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
@@ -21,6 +22,7 @@ import com.termux.terminal.TerminalSessionClient
 import com.termux.view.TerminalView
 import com.termux.view.TerminalViewClient
 import java.io.File
+import kotlinx.coroutines.launch
 
 @Composable
 fun TerminalScreen(
@@ -33,6 +35,8 @@ fun TerminalScreen(
     var attempt by remember { mutableIntStateOf(0) }
     var showRetryDialog by remember { mutableStateOf(false) }
     var useNoSeccomp by remember { mutableStateOf(noSeccomp) }
+    var useLinker by remember { mutableStateOf(false) }
+    val uiScope = rememberCoroutineScope()
 
     BackHandler { onExit() }
 
@@ -42,11 +46,21 @@ fun TerminalScreen(
             distro = distro,
             shell = shell,
             noSeccomp = useNoSeccomp,
+            useLinker = useLinker,
             onSessionFinished = { exitStatus ->
-                if (!useNoSeccomp && exitStatus != 0) {
-                    showRetryDialog = true
-                } else {
-                    onExit()
+                // Termux invokes this from its process-waiter thread. Marshal
+                // Compose state changes back to the main dispatcher.
+                uiScope.launch {
+                    if (!useLinker && exitStatus != 0) {
+                        // TerminalSession cannot expose execve errno. Retry
+                        // once through linker64, matching the daemon fallback.
+                        useLinker = true
+                        attempt++
+                    } else if (!useNoSeccomp && exitStatus != 0) {
+                        showRetryDialog = true
+                    } else {
+                        onExit()
+                    }
                 }
             },
         )
@@ -77,6 +91,7 @@ private fun TerminalViewHost(
     distro: String,
     shell: String,
     noSeccomp: Boolean,
+    useLinker: Boolean,
     onSessionFinished: (Int) -> Unit,
 ) {
     val sessionRef = remember { arrayOfNulls<TerminalSession>(1) }
@@ -114,7 +129,14 @@ private fun TerminalViewHost(
             terminalView.setTerminalViewClient(client)
 
             val prootPath = File(filesDir, "proot/proot").absolutePath
-            val args = arrayOf(prootPath) + (NativeLib.buildProotArgs(distro, shell) ?: emptyArray())
+            val prootArgs = NativeLib.buildProotArgs(distro, shell)
+                ?: error("Rootfs is missing: $distro")
+            val executable = if (useLinker) "/system/bin/linker64" else prootPath
+            val args = if (useLinker) {
+                arrayOf(executable, prootPath) + prootArgs
+            } else {
+                arrayOf(prootPath) + prootArgs
+            }
             val env = buildList {
                 add("PATH=/system/bin:/system/xbin")
                 if (noSeccomp) add("PROOT_NO_SECCOMP=1")
@@ -142,7 +164,7 @@ private fun TerminalViewHost(
                 override fun logStackTrace(tag: String, e: Exception) { android.util.Log.e(tag, "", e) }
             }
 
-            val session = TerminalSession(prootPath, "/", args, env, null, sessionClient)
+            val session = TerminalSession(executable, "/", args, env, null, sessionClient)
             sessionRef[0] = session
             terminalView.attachSession(session)
             terminalView

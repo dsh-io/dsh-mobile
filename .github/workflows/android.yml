@@ -35,11 +35,11 @@ jobs:
           sudo tar xJf /tmp/rootfs-out/debian.tar.xz -C /tmp/rootfs --no-same-owner --touch
           curl -fsSL -o /tmp/dsh.tar.gz \
             "https://github.com/dsh-io/dsh-arm64/releases/download/v0.1.0-rc.6/dsh-arm64-0.1.0-rc.6.tar.gz"
-          sudo mkdir -p /tmp/rootfs/dsh
-          sudo tar xzf /tmp/dsh.tar.gz -C /tmp/rootfs/dsh
+          sudo mkdir -p /tmp/rootfs/root/dsh
+          sudo tar xzf /tmp/dsh.tar.gz -C /tmp/rootfs/root/dsh
           # same launch contract as the app's daemon.rs: node --expose-internals
           sudo chroot /tmp/rootfs /usr/bin/env -i HOME=/root PATH=/usr/bin:/bin \
-            nohup node --expose-internals /dsh/node_modules/@deepseek-ai/dsh/lib/bin.js web \
+            nohup node --expose-internals /root/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js web \
             >/tmp/engine.log 2>&1 &
           for i in $(seq 1 60); do
             curl -fsS -o /dev/null http://127.0.0.1:3080 && break

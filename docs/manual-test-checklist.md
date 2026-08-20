@@ -9,6 +9,7 @@ Build: APK artifact from the CI `android-build` workflow.
 - [ ] With low free space → first-run screen shows "Insufficient storage" error; retry after freeing space works
 - [ ] Foreground notification appears ("Harness runtime running") with a Stop button
 - [ ] WebView shows the dsh web UI at 127.0.0.1:3080 (chat screen visible)
+- [ ] `dsh.log` has no `MODULE_NOT_FOUND` for the app-private dsh package (the `/root/dsh` bind is active)
 - [ ] Notification permission prompt shown on API 33+; denied still works (service degrades gracefully)
 
 ## Harness tab

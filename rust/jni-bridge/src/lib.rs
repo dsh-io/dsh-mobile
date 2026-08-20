@@ -12,6 +12,8 @@ static LAST_ERROR: Mutex<String> = Mutex::new(String::new());
 
 const ENOENT: jint = -2;
 const EINVAL: jint = -22;
+const PROCESS_RUNNING: jint = jint::MIN;
+const PROCESS_GONE: jint = jint::MIN + 1;
 
 #[no_mangle]
 pub extern "system" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut std::ffi::c_void) -> jint {
@@ -91,10 +93,7 @@ pub extern "system" fn Java_com_dshio_dshmobile_NativeLib_buildProotArgs(
                     Ok(s) => s,
                     Err(_) => return std::ptr::null_mut(),
                 };
-                if env
-                    .set_object_array_element(&array, i as jint, &s)
-                    .is_err()
-                {
+                if env.set_object_array_element(&array, i as jint, &s).is_err() {
                     return std::ptr::null_mut();
                 }
             }
@@ -184,8 +183,12 @@ pub extern "system" fn Java_com_dshio_dshmobile_NativeLib_startDsh(
     dsh_dir: JString,
     log_path: JString,
 ) -> jint {
-    let Ok(dsh) = get_str(&mut env, &dsh_dir) else { return EINVAL };
-    let Ok(log) = get_str(&mut env, &log_path) else { return EINVAL };
+    let Ok(dsh) = get_str(&mut env, &dsh_dir) else {
+        return EINVAL;
+    };
+    let Ok(log) = get_str(&mut env, &log_path) else {
+        return EINVAL;
+    };
     let rootfs = files_dir().join("rootfs").join("debian");
     if !rootfs.is_dir() {
         return ENOENT;
@@ -194,7 +197,8 @@ pub extern "system" fn Java_com_dshio_dshmobile_NativeLib_startDsh(
     if !proot.is_file() {
         return ENOENT;
     }
-    let bin = PathBuf::from(&dsh)
+    let dsh_host = PathBuf::from(&dsh);
+    let bin = dsh_host
         .join("node_modules")
         .join("@deepseek-ai")
         .join("dsh")
@@ -203,10 +207,18 @@ pub extern "system" fn Java_com_dshio_dshmobile_NativeLib_startDsh(
     if !bin.is_file() {
         return ENOENT;
     }
+    // The package is outside the guest rootfs. Without an explicit bind,
+    // proot translates its Android host path through `-r` and Node cannot
+    // find bin.js. A real mountpoint also keeps behavior consistent across
+    // proot versions that require the guest target to exist.
+    let dsh_guest = "/root/dsh";
+    if std::fs::create_dir_all(rootfs.join("root/dsh")).is_err() {
+        return -1;
+    }
     let cmd = vec![
         "node".to_string(),
         "--expose-internals".to_string(),
-        bin.to_string_lossy().to_string(),
+        format!("{dsh_guest}/node_modules/@deepseek-ai/dsh/lib/bin.js"),
         "web".to_string(),
     ];
     // The proot binary is the executable: spawn_daemon execs prog directly,
@@ -214,7 +226,14 @@ pub extern "system" fn Java_com_dshio_dshmobile_NativeLib_startDsh(
     // Mirrors the baseline terminal session (arrayOf(prootPath) +
     // buildProotArgs(...)).
     let mut argv = vec![proot.to_string_lossy().to_string()];
-    argv.extend(proot_runner::daemon::build_daemon_args(&rootfs, &cmd));
+    argv.extend(proot_runner::daemon::build_daemon_args_with_binds(
+        &rootfs,
+        &[(
+            dsh_host.to_string_lossy().to_string(),
+            dsh_guest.to_string(),
+        )],
+        &cmd,
+    ));
     let env = vec![
         "PATH=/system/bin:/system/xbin".to_string(),
         "HOME=/data".to_string(),
@@ -254,24 +273,34 @@ pub extern "system" fn Java_com_dshio_dshmobile_NativeLib_stopDsh(
 }
 
 /// Reap the engine child (non-blocking) and report how it died:
-///   > 0 → killed by that signal (11=SIGSEGV, 6=SIGABRT, 9=SIGKILL)
-///   < 0 → exited with that code (negated)
-///   0   → still alive / already reaped elsewhere
+///   > 0              → killed by that signal
+///   -(exit_code + 1) → normal exit (so exit 0 remains distinguishable)
+///   PROCESS_RUNNING  → child is still running
+///   PROCESS_GONE     → no longer a child / already reaped
 fn reap_status(pid: i32) -> i32 {
     if pid <= 0 {
-        return 0;
+        return PROCESS_GONE;
     }
     let mut status: libc::c_int = 0;
     let r = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    if r == 0 {
+        return PROCESS_RUNNING;
+    }
     if r != pid {
-        return 0; // still alive, or ECHILD (already reaped) — nothing to report
+        return if std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD) {
+            PROCESS_GONE
+        } else {
+            // An interrupted/non-ECHILD wait does not prove death. Preserve
+            // single-flight until a later poll or stop_pgid confirms it.
+            PROCESS_RUNNING
+        };
     }
     if libc::WIFSIGNALED(status) {
         libc::WTERMSIG(status) as i32
     } else if libc::WIFEXITED(status) {
-        -(libc::WEXITSTATUS(status) as i32)
+        -(libc::WEXITSTATUS(status) as i32 + 1)
     } else {
-        0
+        PROCESS_RUNNING
     }
 }
 
@@ -300,20 +329,22 @@ pub extern "system" fn Java_com_dshio_dshmobile_NativeLib_extractVerified(
     expected_sha256: JString,
     dest: JString,
 ) -> jint {
-    let Ok(t) = get_str(&mut env, &tarball) else { return EINVAL };
-    let Ok(sha) = get_str(&mut env, &expected_sha256) else { return EINVAL };
-    let Ok(d) = get_str(&mut env, &dest) else { return EINVAL };
+    let Ok(t) = get_str(&mut env, &tarball) else {
+        return EINVAL;
+    };
+    let Ok(sha) = get_str(&mut env, &expected_sha256) else {
+        return EINVAL;
+    };
+    let Ok(d) = get_str(&mut env, &dest) else {
+        return EINVAL;
+    };
     let set_err = |msg: &str| {
         eprintln!("extractVerified error: {msg}");
         if let Ok(mut guard) = LAST_ERROR.lock() {
             *guard = msg.to_string();
         }
     };
-    match rootfs_manager::extract::install_rootfs(
-        &PathBuf::from(t),
-        &PathBuf::from(d),
-        &sha,
-    ) {
+    match rootfs_manager::extract::install_rootfs(&PathBuf::from(t), &PathBuf::from(d), &sha) {
         Ok(()) => {
             if let Ok(mut guard) = LAST_ERROR.lock() {
                 guard.clear();
@@ -390,10 +421,10 @@ mod tests {
                 libc::_exit(0);
             }
             libc::kill(pid, libc::SIGKILL);
-            let mut st = 0;
+            let mut st = PROCESS_RUNNING;
             for _ in 0..100 {
                 st = reap_status(pid);
-                if st != 0 {
+                if st != PROCESS_RUNNING {
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
@@ -405,23 +436,23 @@ mod tests {
             if pid == 0 {
                 libc::_exit(7);
             }
-            let mut st = 0;
+            let mut st = PROCESS_RUNNING;
             for _ in 0..100 {
                 st = reap_status(pid);
-                if st != 0 {
+                if st != PROCESS_RUNNING {
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
-            assert_eq!(st, -7);
+            assert_eq!(st, -8);
 
-            // non-existent pid → 0 (ECHILD)
-            assert_eq!(reap_status(999_999), 0);
+            // non-child pid is distinguishable from a live child.
+            assert_eq!(reap_status(999_999), PROCESS_GONE);
         }
     }
 
     #[test]
-    fn reap_exit_status_live_child_returns_zero() {
+    fn reap_exit_status_live_child_returns_running_sentinel() {
         unsafe {
             let pid = libc::fork();
             if pid == 0 {
@@ -429,7 +460,7 @@ mod tests {
                 libc::_exit(0);
             }
             let st = reap_status(pid);
-            assert_eq!(st, 0); // still alive — nothing to reap yet
+            assert_eq!(st, PROCESS_RUNNING);
             libc::kill(pid, libc::SIGKILL);
             let mut status: libc::c_int = 0;
             assert_eq!(libc::waitpid(pid, &mut status, 0), pid);

@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.os.StatFs
+import android.os.SystemClock
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -39,17 +40,27 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.io.File
+import java.nio.file.Files
+import java.util.ArrayDeque
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : ComponentActivity() {
+    private companion object {
+        // Four supervised boot attempts, each allowed the service's full
+        // never-ready window, plus process-stop/restart overhead.
+        const val ENGINE_READY_UI_TIMEOUT_MS = 9 * 60_000L
+        val engineFlowRunning = AtomicBoolean(false)
+    }
+
     private val notifPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
 
     // Single-flight CAS (device-verified in harness-mobile: onCreate +
     // onResume both trigger the flow; two threads extracting/starting in
     // parallel kill the engine).
-    private val engineFlowRunning = AtomicBoolean(false)
+    @Volatile private var ownsEngineFlow = false
+    private val retryAfterOtherFlow = AtomicBoolean(false)
 
     private sealed interface AppState {
         data class Extracting(val text: String) : AppState
@@ -109,12 +120,26 @@ class MainActivity : ComponentActivity() {
     private fun startExtract() {
         if (!engineFlowRunning.compareAndSet(false, true)) {
             AppLog.d("Main", "startExtract: CAS lost — another flow is running")
+            // The current flow may belong to an Activity instance that is
+            // being replaced. Its result cannot update this instance, so wait
+            // once and re-enter after it releases the process-wide CAS.
+            if (!ownsEngineFlow && retryAfterOtherFlow.compareAndSet(false, true)) {
+                CoroutineScope(Dispatchers.IO).launch {
+                    while (engineFlowRunning.get()) Thread.sleep(100)
+                    retryAfterOtherFlow.set(false)
+                    runOnUiThread {
+                        if (!isFinishing && !isDestroyed) startExtract()
+                    }
+                }
+            }
             return
         }
+        ownsEngineFlow = true
         AppLog.i("Main", "startExtract: CAS won — starting bootstrap")
         CoroutineScope(Dispatchers.IO).launch {
             val t0 = System.currentTimeMillis()
             try {
+                runOnUiThread { state = AppState.Extracting("Checking installation…") }
                 ensureProotBinary()
                 val missing = ensureAssetsExtracted { text ->
                     runOnUiThread { state = AppState.Extracting(text) }
@@ -127,25 +152,35 @@ class MainActivity : ComponentActivity() {
                 AppLog.i("Main", "assets ready in ${System.currentTimeMillis() - t0}ms")
                 val intent = Intent(this@MainActivity, DshService::class.java)
                 intent.action = DshService.ACTION_START
+                runOnUiThread { state = AppState.Starting }
                 startForegroundService(intent) // minSdk 26, no legacy branch needed
-                var waited = 0
-                while (!DshService.isReady && waited < 90 && DshService.runningPid > 0) {
-                    Thread.sleep(1000)
-                    waited++
+                // startForegroundService() only enqueues service creation. The
+                // old `runningPid > 0` loop therefore skipped immediately on
+                // most devices, before onStartCommand had a chance to spawn.
+                val deadline = SystemClock.elapsedRealtime() + ENGINE_READY_UI_TIMEOUT_MS
+                while (
+                    !DshService.isReady &&
+                    DshService.fatalError == null &&
+                    SystemClock.elapsedRealtime() < deadline
+                ) {
+                    Thread.sleep(500)
                 }
                 runOnUiThread {
                     state = if (DshService.isReady) {
                         AppLog.i("Main", "engine ready after ${System.currentTimeMillis() - t0}ms")
                         AppState.Ready
                     } else {
-                        AppLog.e("Main", "engine not ready (waited ${waited}s, pid=${DshService.runningPid})")
-                        AppState.Error("DeepCode failed to start — see logs/dsh.log")
+                        val detail = DshService.fatalError
+                            ?: "Engine startup timed out — see logs/dsh.log"
+                        AppLog.e("Main", "engine not ready (pid=${DshService.runningPid}): $detail")
+                        AppState.Error(detail)
                     }
                 }
             } catch (e: Exception) {
                 AppLog.e("Main", "bootstrap threw: $e")
                 runOnUiThread { state = AppState.Error(e.message ?: "Unexpected failure") }
             } finally {
+                ownsEngineFlow = false
                 engineFlowRunning.set(false)
             }
         }
@@ -158,16 +193,34 @@ class MainActivity : ComponentActivity() {
         // overwriting it would EACCES forever (reinstall-without-clear,
         // harness-mobile ProotRuntime pattern).
         if (target.exists()) return
-        assets.open("proot/proot-aarch64").use { input ->
-            target.outputStream().use { out -> input.copyTo(out) }
+        // Copy and chmod a temporary file, then publish it atomically. A
+        // force-stop halfway through the copy must never leave a truncated
+        // `proot` that the skip-if-exists rule would trust forever.
+        val tmp = File(dir, "proot.tmp")
+        if (tmp.exists() && !tmp.delete()) error("Cannot clean stale proot.tmp")
+        try {
+            assets.open("proot/proot-aarch64").use { input ->
+                tmp.outputStream().use { out -> input.copyTo(out) }
+            }
+            check(tmp.setExecutable(true)) { "Cannot make proot executable" }
+            // W^X: strict OEMs refuse a writable app-data ELF.
+            check(tmp.setWritable(false, false)) { "Cannot make proot read-only" }
+            check(tmp.renameTo(target)) { "Cannot install proot atomically" }
+        } finally {
+            if (tmp.exists()) {
+                tmp.setWritable(true)
+                tmp.delete()
+            }
         }
-        target.setExecutable(true)
-        // W^X: a writable proot binary is refused by Huawei/EMUI exec (and
-        // by mmap PROT_EXEC); the binary is never self-modifying.
-        target.setWritable(false, false)
     }
 
     private fun ensureAssetsExtracted(onProgress: (String) -> Unit): String? {
+        val rootfsReady = File(filesDir, "rootfs/debian/bin/sh").exists()
+        val dshReady = File(filesDir, "dsh/node_modules/@deepseek-ai/dsh/lib/bin.js").exists()
+        // Do not reject a healthy, already-installed runtime just because
+        // extraction consumed most of the initially available free space.
+        if (rootfsReady && dshReady) return null
+
         // Real writable space on the filesystem holding filesDir. Per the
         // Android docs getAvailableBytes() (statvfs.f_bavail) is "the number
         // of bytes that are free on the file system and available to
@@ -188,7 +241,7 @@ class MainActivity : ComponentActivity() {
         // rootfs: assets/rootfs/debian.tar.xz + .sha256 → files/rootfs/debian.
         // The .sha256 assets are bare 64-hex hashes (see build-rootfs.sh / CI).
         val rootfsTar = File(filesDir, "downloads/rootfs.tar.xz")
-        if (!File(filesDir, "rootfs/debian/bin/sh").exists()) {
+        if (!rootfsReady) {
             onProgress("Extracting rootfs (~1GB)…")
             copyAssetToFile("rootfs/debian.tar.xz", rootfsTar)
             val sha = assets.open("rootfs/debian.tar.xz.sha256").bufferedReader().use { it.readText().trim() }
@@ -200,7 +253,7 @@ class MainActivity : ComponentActivity() {
         }
         // dsh package: assets/dsh/dsh-arm64-0.1.0-rc.6.tar.gz + .sha256 → files/dsh
         val dshTar = File(filesDir, "downloads/dsh.tar.gz")
-        if (!File(filesDir, "dsh/node_modules/@deepseek-ai/dsh/lib/bin.js").exists()) {
+        if (!dshReady) {
             onProgress("Extracting dsh package…")
             copyAssetToFile("dsh/dsh-arm64-0.1.0-rc.6.tar.gz", dshTar)
             val sha = assets.open("dsh/dsh-arm64-0.1.0-rc.6.tar.gz.sha256").bufferedReader().use { it.readText().trim() }
@@ -236,15 +289,48 @@ class MainActivity : ComponentActivity() {
     // targetSdk. Batches of 64, 30s cap, silent on failure (kernels without
     // the check don't need it). Arg array passed directly — no shell.
     private fun stampExecAttributes(root: File) {
+        val setfattr = File("/system/bin/setfattr")
+        if (!setfattr.canExecute()) {
+            AppLog.d("Main", "setfattr unavailable; skipping security.android.exec stamps")
+            return
+        }
         val execFiles = mutableListOf<File>()
-        root.walkTopDown().forEach { if (it.isFile && it.canExecute()) execFiles.add(it) }
+        try {
+            val dirs = ArrayDeque<File>()
+            dirs.add(root)
+            while (dirs.isNotEmpty()) {
+                val dir = dirs.removeLast()
+                dir.listFiles()?.forEach { child ->
+                    // Debian carries absolute symlinks. Never follow them out
+                    // of the app tree while collecting stamp targets.
+                    if (Files.isSymbolicLink(child.toPath())) return@forEach
+                    if (child.isDirectory) dirs.add(child)
+                    else if (child.isFile && child.canExecute()) execFiles.add(child)
+                }
+            }
+        } catch (e: Exception) {
+            AppLog.d("Main", "setfattr scan failed: ${e.message}")
+            return
+        }
         if (execFiles.isEmpty()) return
-        val base = listOf("/system/bin/setfattr", "-n", "security.android.exec", "-v", "1")
+        val base = listOf(setfattr.absolutePath, "-n", "security.android.exec", "-v", "1")
+        val deadline = SystemClock.elapsedRealtime() + 30_000L
         execFiles.chunked(64).forEach { batch ->
-            batch.map { f ->
-                ProcessBuilder(base + f.absolutePath).redirectErrorStream(true).start()
-            }.forEach { p ->
-                if (!p.waitFor(30, TimeUnit.SECONDS)) p.destroyForcibly()
+            val remaining = deadline - SystemClock.elapsedRealtime()
+            if (remaining <= 0) return
+            try {
+                // setfattr accepts multiple paths: one process per batch,
+                // bounded by one 30s cap for the whole best-effort pass.
+                val p = ProcessBuilder(base + batch.map { it.absolutePath })
+                    .redirectErrorStream(true)
+                    .start()
+                if (!p.waitFor(remaining, TimeUnit.MILLISECONDS)) {
+                    p.destroyForcibly()
+                    return
+                }
+            } catch (e: Exception) {
+                AppLog.d("Main", "setfattr unavailable/denied: ${e.message}")
+                return
             }
         }
     }

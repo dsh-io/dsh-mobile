@@ -23,8 +23,8 @@ android {
         applicationId = "com.dshio.dshmobile"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 4
+        versionName = "0.1.4"
         // pinned to the NDK version installed by setup-android in CI; without
         // this AGP tries to auto-download its default NDK (license prompt → fail)
         ndkVersion = "26.3.11579264"

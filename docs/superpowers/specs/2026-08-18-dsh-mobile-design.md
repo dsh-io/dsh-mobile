@@ -50,7 +50,8 @@ full-screen WebView, with a terminal page available for manual operations.
      files).
    - `jni-bridge` (lib.rs): existing JNI exports plus three new ones —
      `startDsh(dshDir, logPath) -> pid` (spawns the proot daemon running
-     `node --expose-internals <dsh>/lib/bin.js web` without a TTY, falling
+     `node --expose-internals /root/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js web` without a TTY after
+     bind-mounting the app-private dsh package at `/root/dsh`, falling
      back to `/system/bin/linker64` when Android 15+ denies the direct exec
      of the app-data proot ELF),
      `stopDsh(pid)` (terminate process group), and
@@ -93,8 +94,9 @@ full-screen WebView, with a terminal page available for manual operations.
 
 1. App start → check whether rootfs/dsh are already extracted in app-private
    storage; if not, extract from assets with progress.
-2. Start DshService → Rust spawns `proot [debian rootfs] node
-   --expose-internals <dsh>/node_modules/@deepseek-ai/dsh/lib/bin.js web`.
+2. Start DshService → Rust binds the external package directory into the
+   guest at `/root/dsh`, then spawns `proot [debian rootfs] node
+   --expose-internals /root/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js web`.
 3. Service polls `http://127.0.0.1:3080` until ready → MainActivity loads the
    URL in the WebView.
 4. First run of the harness UI walks the user through API key and profile

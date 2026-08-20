@@ -6,6 +6,19 @@ use std::time::Instant;
 /// Identical to command::build_proot_args except the shell/-l tail is
 /// replaced by the raw command.
 pub fn build_daemon_args(rootfs: &Path, cmd: &[String]) -> Vec<String> {
+    build_daemon_args_with_binds(rootfs, &[], cmd)
+}
+
+/// Build daemon arguments with explicit host-to-guest bind mounts.
+///
+/// The dsh package lives next to the rootfs in Android app storage, so it is
+/// not visible after `proot -r` unless it is bound into the guest explicitly.
+/// Bind options must appear before the command (`/usr/bin/env`).
+pub fn build_daemon_args_with_binds(
+    rootfs: &Path,
+    binds: &[(String, String)],
+    cmd: &[String],
+) -> Vec<String> {
     let mut args = vec![
         "-0".to_string(),
         "-r".to_string(),
@@ -19,12 +32,18 @@ pub fn build_daemon_args(rootfs: &Path, cmd: &[String]) -> Vec<String> {
         "-w".to_string(),
         "/root".to_string(),
         "--kill-on-exit".to_string(),
+    ];
+    for (host, guest) in binds {
+        args.push("-b".to_string());
+        args.push(format!("{host}:{guest}"));
+    }
+    args.extend([
         "/usr/bin/env".to_string(),
         "-i".to_string(),
         "HOME=/root".to_string(),
         "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
         "TERM=xterm-256color".to_string(),
-    ];
+    ]);
     args.extend_from_slice(cmd);
     args
 }
@@ -53,7 +72,10 @@ pub fn spawn_daemon(
         }
         if pid == 0 {
             libc::setsid();
-            let devnull = libc::open(b"/dev/null\0".as_ptr() as *const libc::c_char, libc::O_RDONLY);
+            let devnull = libc::open(
+                b"/dev/null\0".as_ptr() as *const libc::c_char,
+                libc::O_RDONLY,
+            );
             if devnull >= 0 {
                 libc::dup2(devnull, 0);
                 libc::close(devnull);
@@ -74,12 +96,16 @@ pub fn spawn_daemon(
                 libc::close(log_fd);
             }
             let prog_c = std::ffi::CString::new(prog).unwrap();
-            let argv_c: Vec<std::ffi::CString> =
-                argv.iter().map(|a| std::ffi::CString::new(a.as_str()).unwrap()).collect();
+            let argv_c: Vec<std::ffi::CString> = argv
+                .iter()
+                .map(|a| std::ffi::CString::new(a.as_str()).unwrap())
+                .collect();
             let mut argv_p: Vec<*const libc::c_char> = argv_c.iter().map(|c| c.as_ptr()).collect();
             argv_p.push(std::ptr::null());
-            let env_c: Vec<std::ffi::CString> =
-                env.iter().map(|e| std::ffi::CString::new(e.as_str()).unwrap()).collect();
+            let env_c: Vec<std::ffi::CString> = env
+                .iter()
+                .map(|e| std::ffi::CString::new(e.as_str()).unwrap())
+                .collect();
             let mut env_p: Vec<*const libc::c_char> = env_c.iter().map(|c| c.as_ptr()).collect();
             env_p.push(std::ptr::null());
             libc::execve(prog_c.as_ptr(), argv_p.as_ptr(), env_p.as_ptr());
@@ -101,10 +127,21 @@ pub fn spawn_daemon(
 /// burning the full 3s window.
 pub fn stop_pgid(pid: libc::pid_t) -> bool {
     unsafe {
+        let mut status: libc::c_int = 0;
+        // Check/reap before signalling. Supervision may already have reaped a
+        // crashed child; signalling -pid first risks hitting a rapidly reused
+        // process-group id that no longer belongs to us.
+        let initial = libc::waitpid(pid, &mut status, libc::WNOHANG);
+        if initial == pid {
+            return true;
+        }
+        if initial < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD) {
+            return true;
+        }
+
         libc::kill(-pid, libc::SIGTERM);
         let deadline = Instant::now() + std::time::Duration::from_secs(3);
         loop {
-            let mut status: libc::c_int = 0;
             let r = libc::waitpid(pid, &mut status, libc::WNOHANG);
             if r == pid {
                 return true;
@@ -131,7 +168,11 @@ mod tests {
     fn daemon_args_have_no_login_shell() {
         let args = build_daemon_args(
             &PathBuf::from("/data/files/rootfs/debian"),
-            &["node".into(), "--expose-internals".into(), "/data/files/dsh/bin.js".into()],
+            &[
+                "node".into(),
+                "--expose-internals".into(),
+                "/data/files/dsh/bin.js".into(),
+            ],
         );
         assert_eq!(&args[0..2], &["-0", "-r"]);
         assert_eq!(args[2], "/data/files/rootfs/debian");
@@ -139,8 +180,28 @@ mod tests {
         let i_pos = args.iter().position(|a| a == "-i").unwrap();
         assert_eq!(args[i_pos + 1], "HOME=/root");
         let cmd_start = args.iter().position(|a| a == "node").unwrap();
-        assert_eq!(&args[cmd_start..], &["node", "--expose-internals", "/data/files/dsh/bin.js"]);
+        assert_eq!(
+            &args[cmd_start..],
+            &["node", "--expose-internals", "/data/files/dsh/bin.js"]
+        );
         assert!(!args.contains(&"-l".to_string()));
+    }
+
+    #[test]
+    fn daemon_bind_is_visible_before_guest_command() {
+        let args = build_daemon_args_with_binds(
+            &PathBuf::from("/data/files/rootfs/debian"),
+            &[("/data/files/dsh".into(), "/root/dsh".into())],
+            &["node".into(), "/root/dsh/lib/bin.js".into()],
+        );
+        let bind_pos = args
+            .iter()
+            .position(|a| a == "/data/files/dsh:/root/dsh")
+            .unwrap();
+        let env_pos = args.iter().position(|a| a == "/usr/bin/env").unwrap();
+        let cmd_pos = args.iter().position(|a| a == "node").unwrap();
+        assert_eq!(args[bind_pos - 1], "-b");
+        assert!(bind_pos < env_pos && env_pos < cmd_pos);
     }
 
     #[test]
@@ -151,7 +212,11 @@ mod tests {
         let log = dir.join("dsh.log");
         let env = vec!["PATH=/bin:/usr/bin".to_string()];
         let pid = spawn_daemon(
-            &["/bin/sh".into(), "-c".into(), "echo daemon-alive; sleep 60".into()],
+            &[
+                "/bin/sh".into(),
+                "-c".into(),
+                "echo daemon-alive; sleep 60".into(),
+            ],
             "/bin/sh",
             &env,
             &log,
@@ -161,7 +226,10 @@ mod tests {
         // parallel and slow runners can delay the child's first output)
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         loop {
-            if std::fs::read_to_string(&log).map(|s| s.contains("daemon-alive")).unwrap_or(false) {
+            if std::fs::read_to_string(&log)
+                .map(|s| s.contains("daemon-alive"))
+                .unwrap_or(false)
+            {
                 break;
             }
             assert!(std::time::Instant::now() < deadline, "log never got output");
@@ -200,16 +268,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("dsh.log");
-        let pid = spawn_daemon(
-            &["/bin/true".into()],
-            "/bin/true",
-            &[],
-            &log,
-        )
-        .expect("spawn daemon");
+        let pid =
+            spawn_daemon(&["/bin/true".into()], "/bin/true", &[], &log).expect("spawn daemon");
         let mut status: libc::c_int = 0;
-        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid); // reap it
-        // now stop_pgid must detect ECHILD and return true instantly (no 3s wait)
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        // stop_pgid must detect ECHILD and return instantly (no 3s wait).
         let start = std::time::Instant::now();
         assert!(stop_pgid(pid));
         assert!(start.elapsed() < std::time::Duration::from_secs(1));

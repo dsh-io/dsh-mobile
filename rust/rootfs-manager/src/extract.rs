@@ -42,10 +42,10 @@ fn strip_write_bits(root: &Path) -> Result<(), String> {
     fn visit(dir: &Path) -> Result<(), String> {
         use std::os::unix::ffi::OsStrExt;
         use std::os::unix::fs::MetadataExt;
-        for entry in std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))? {
-            let p = entry
-                .map_err(|e| format!("read_dir entry: {e}"))?
-                .path();
+        for entry in
+            std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))?
+        {
+            let p = entry.map_err(|e| format!("read_dir entry: {e}"))?.path();
             let md = match std::fs::symlink_metadata(&p) {
                 Ok(md) => md,
                 Err(_) => continue,
@@ -65,7 +65,13 @@ fn strip_write_bits(root: &Path) -> Result<(), String> {
                 let c = std::ffi::CString::new(p.as_os_str().as_bytes())
                     .map_err(|_| format!("cstring: {}", p.display()))?;
                 unsafe {
-                    libc::chmod(c.as_ptr(), mode & !0o222);
+                    if libc::chmod(c.as_ptr(), mode & !0o222) != 0 {
+                        return Err(format!(
+                            "chmod {}: {}",
+                            p.display(),
+                            std::io::Error::last_os_error()
+                        ));
+                    }
                 }
             }
         }
@@ -82,10 +88,10 @@ fn make_writable_recursive(root: &Path) -> Result<(), String> {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::MetadataExt;
     fn visit(dir: &Path) -> Result<(), String> {
-        for entry in std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))? {
-            let p = entry
-                .map_err(|e| format!("read_dir entry: {e}"))?
-                .path();
+        for entry in
+            std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))?
+        {
+            let p = entry.map_err(|e| format!("read_dir entry: {e}"))?.path();
             let md = match std::fs::symlink_metadata(&p) {
                 Ok(md) => md,
                 Err(_) => continue,
@@ -99,7 +105,13 @@ fn make_writable_recursive(root: &Path) -> Result<(), String> {
             let c = std::ffi::CString::new(p.as_os_str().as_bytes())
                 .map_err(|_| format!("cstring: {}", p.display()))?;
             unsafe {
-                libc::chmod(c.as_ptr(), md.mode() | 0o200);
+                if libc::chmod(c.as_ptr(), md.mode() | 0o200) != 0 {
+                    return Err(format!(
+                        "chmod {}: {}",
+                        p.display(),
+                        std::io::Error::last_os_error()
+                    ));
+                }
             }
         }
         Ok(())
@@ -123,7 +135,9 @@ fn remove_dir_all_force(p: &Path, what: &str) -> Result<(), String> {
 pub fn install_rootfs(tarball: &Path, dest: &Path, expected_sha256: &str) -> Result<(), String> {
     let actual = crate::verify::sha256_hex(tarball)?;
     if actual != expected_sha256.to_lowercase() {
-        return Err(format!("sha256 mismatch: got {actual}, want {expected_sha256}"));
+        return Err(format!(
+            "sha256 mismatch: got {actual}, want {expected_sha256}"
+        ));
     }
     let tmp = dest.with_extension("tmp");
     if tmp.exists() {
@@ -237,7 +251,10 @@ mod tests {
 
         let dest = dir.join("dest");
         let err = extract_archive(&tgz, &dest).unwrap_err();
-        assert!(err.contains("extract"), "expected extract error, got: {err}");
+        assert!(
+            err.contains("extract"),
+            "expected extract error, got: {err}"
+        );
         assert!(!dir.join("evil").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -296,9 +313,21 @@ mod tests {
         );
         let dest = dir.join("dest");
         extract_archive(&tgz, &dest).unwrap();
-        assert_eq!(mode_of(&dest.join("usr/bin/tool")) & 0o222, 0, "executable must be non-writable (W^X)");
-        assert_eq!(mode_of(&dest.join("usr/bin/tool")) & 0o111, 0o111, "exec bit must survive");
-        assert_ne!(mode_of(&dest.join("usr/bin/plain")) & 0o222, 0, "plain file keeps write bits");
+        assert_eq!(
+            mode_of(&dest.join("usr/bin/tool")) & 0o222,
+            0,
+            "executable must be non-writable (W^X)"
+        );
+        assert_eq!(
+            mode_of(&dest.join("usr/bin/tool")) & 0o111,
+            0o111,
+            "exec bit must survive"
+        );
+        assert_ne!(
+            mode_of(&dest.join("usr/bin/plain")) & 0o222,
+            0,
+            "plain file keeps write bits"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -316,9 +345,21 @@ mod tests {
         );
         let dest = dir.join("dest");
         extract_archive(&tgz, &dest).unwrap();
-        assert_eq!(mode_of(&dest.join("usr/lib/libc++.so")) & 0o222, 0, ".so must be non-writable");
-        assert_eq!(mode_of(&dest.join("usr/lib/pty.node")) & 0o222, 0, ".node must be non-writable");
-        assert_ne!(mode_of(&dest.join("usr/lib/libfoo.a")) & 0o222, 0, "non-dlopen lib keeps write bits");
+        assert_eq!(
+            mode_of(&dest.join("usr/lib/libc++.so")) & 0o222,
+            0,
+            ".so must be non-writable"
+        );
+        assert_eq!(
+            mode_of(&dest.join("usr/lib/pty.node")) & 0o222,
+            0,
+            ".node must be non-writable"
+        );
+        assert_ne!(
+            mode_of(&dest.join("usr/lib/libfoo.a")) & 0o222,
+            0,
+            "non-dlopen lib keeps write bits"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -328,7 +369,10 @@ mod tests {
         let tgz = dir.join("root.tar.gz");
         make_tar_gz(
             &tgz,
-            &[("usr/bin/tool", b"#!/bin/sh\necho t\n", 0o755), ("etc/os-release", b"NAME=Test\n", 0o644)],
+            &[
+                ("usr/bin/tool", b"#!/bin/sh\necho t\n", 0o755),
+                ("etc/os-release", b"NAME=Test\n", 0o644),
+            ],
         );
         let good = sha256_hex(&tgz).unwrap();
         let dest = dir.join("rootfs/debian");
